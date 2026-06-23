@@ -11,17 +11,8 @@ from PySide6.QtCore import Qt, Signal
 
 from index_tts_gui.core.tts_client import BaseTTSClient, IndexTTSClient
 from index_tts_gui.core.project import Project
-from index_tts_gui.core.merger import (
-    collect_sentence_wavs,
-    merge_wavs_with_pauses,
-    merge_wavs_with_custom_pauses,
-    validate_wav_order,
-)
-from index_tts_gui.core.pause_advisor import (
-    LLMPauseAdvisor,
-    is_configured as llm_is_configured,
-)
-from index_tts_gui.core.subtitler import generate_srt_from_sentences_with_pauses
+from index_tts_gui.core.merger import collect_sentence_wavs
+from index_tts_gui.ui.merge_worker import MergeWorker
 from index_tts_gui.ui.synthesis_worker import SynthesisWorker
 from index_tts_gui.ui.voice_panel import VoicePanel
 
@@ -40,6 +31,7 @@ class SynthesisPanel(QWidget):
         self._project = project
         self._client = client or IndexTTSClient()
         self._worker: SynthesisWorker | None = None
+        self._merge_worker: MergeWorker | None = None
         self._sentences: list[str] = []
         self._audio_name: str = project.audio_name
         self._output_dir: str = project.output_dir
@@ -249,80 +241,51 @@ class SynthesisPanel(QWidget):
                     self._log_msg(f"✗ 删除失败 {path}: {e}")
 
         self._log_msg(f"🗑 已清空输出目录，删除 {removed} 个文件")
+        self._project.pauses = []
+        self._project.save()
         self._refresh_merge_button()
 
     def _merge_full_audio(self):
-        """把 output_dir 里的片段合并成完整音频，优先使用 LLM 停顿建议。"""
+        """把 output_dir 里的片段合并成完整音频，在后台线程执行。"""
         if not self._sentences:
             self._log_msg("⚠ 没有句子，无法合并")
             return
 
         logger.info("开始合并: output_dir=%s sentences=%d", self._output_dir, len(self._sentences))
 
-        wavs = collect_sentence_wavs(self._output_dir)
-        logger.info("发现音频片段: %d 个", len(wavs))
-        if not wavs:
-            self._log_msg(f"⚠ 在 {self._output_dir} 下未找到 sentence_*.wav")
-            return
+        self._btn_merge.setEnabled(False)
+        self._status_label.setText("正在合并完整音频…")
 
-        if len(wavs) != len(self._sentences):
-            self._log_msg(
-                f"⚠ 音频片段数（{len(wavs)}）与句子数（{len(self._sentences)}）不一致"
-            )
-            return
+        self._merge_worker = MergeWorker(
+            self._sentences, self._output_dir, self._llm_cfg
+        )
+        self._merge_worker.log.connect(self._log_msg)
+        self._merge_worker.progress.connect(self._on_merge_progress)
+        self._merge_worker.finished.connect(self._on_merge_finished)
+        self._merge_worker.error.connect(self._on_merge_error)
+        self._merge_worker.start()
 
-        # 校验文件名中的文本与当前句子是否一致
-        errors = validate_wav_order(wavs, self._sentences)
-        if errors:
-            self._log_msg("⚠ 音频文件与当前句子不匹配：")
-            for err in errors:
-                self._log_msg(f"  - {err}")
-            self._log_msg("请重新合成，或检查 output_tts 目录")
-            return
+    def _on_merge_progress(self, current: int, total: int, message: str):
+        self._progress.setMaximum(total)
+        self._progress.setValue(current)
+        self._status_label.setText(f"合并中 [{current}/{total}]: {message}")
 
-        output_path = os.path.join(self._output_dir, "full_dub.wav")
+    def _on_merge_finished(self, entries: list):
+        self._progress.setValue(self._progress.maximum())
+        self._status_label.setText(f"完整音频已生成: {self._output_dir}/full_dub.wav")
+        self._btn_merge.setEnabled(True)
 
-        # 优先调用 LLM 停顿顾问
-        pauses = None
-        if llm_is_configured(self._llm_cfg):
-            self._log_msg("🤖 正在询问 LLM 停顿建议…")
-            try:
-                advisor = LLMPauseAdvisor(
-                    api_url=self._llm_cfg["api_url"],
-                    api_key=self._llm_cfg["api_key"],
-                    model=self._llm_cfg["model"],
-                    timeout=self._llm_cfg.get("timeout", 60),
-                    prompt_template=self._llm_cfg.get(
-                        "pause_prompt_template", ""
-                    ) or None,
-                )
-                pauses = advisor.advise(self._sentences)
-                self._log_msg(f"📐 LLM 停顿建议: {pauses}")
-            except Exception as e:
-                logger.exception("LLM 停顿顾问失败")
-                self._log_msg(f"⚠ LLM 停顿建议失败，回退标点规则: {e}")
+        # 保存本次合并实际使用的 pauses，供字幕页重新生成时对齐
+        if self._merge_worker is not None:
+            self._project.pauses = list(self._merge_worker.pauses)
+            self._project.save()
 
-        try:
-            if pauses:
-                merge_wavs_with_custom_pauses(wavs, pauses, output_path)
-            else:
-                # 回退到标点规则，同时得到 pauses 用于字幕对齐
-                from index_tts_gui.core.merger import _compute_pauses
-                pauses = _compute_pauses(self._sentences)
-                merge_wavs_with_custom_pauses(wavs, pauses, output_path)
+        self.merge_done.emit(entries)
 
-            self._log_msg(f"✓ 已生成完整音频: {output_path}")
-            self._status_label.setText(f"完整音频已生成: {output_path}")
-
-            # 用同一组 pauses 生成字幕，保证时间轴对齐
-            entries = generate_srt_from_sentences_with_pauses(
-                self._sentences, wavs, pauses
-            )
-            self._log_msg(f"✓ 已生成字幕: {len(entries)} 条")
-            self.merge_done.emit(entries)
-        except Exception as e:
-            logger.exception("合并完整音频失败")
-            self._log_msg(f"✗ 合并失败: {e}")
+    def _on_merge_error(self, msg: str):
+        self._log_msg(f"✗ 合并失败: {msg}")
+        self._status_label.setText("合并失败")
+        self._btn_merge.setEnabled(True)
 
     def set_client(self, client: BaseTTSClient):
         """外部（如 MainWindow）动态切换 API 客户端。"""

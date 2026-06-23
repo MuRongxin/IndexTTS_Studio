@@ -150,6 +150,14 @@ class SettingsDialog(QDialog):
         self._llm_prompt.setPlaceholderText("提示模板，需包含 {text} 和 {max_length}")
         llm_layout.addRow("Prompt 模板:", self._llm_prompt)
 
+        self._llm_punctuation_fallback = QCheckBox(
+            "启用标点规则回退（LLM 失败时自动使用标点停顿）"
+        )
+        self._llm_punctuation_fallback.setToolTip(
+            "关闭时优先使用 LLM 停顿建议，LLM 不可用则报错而非静默回退"
+        )
+        llm_layout.addRow(self._llm_punctuation_fallback)
+
         # 测试连接按钮
         self._btn_test_llm = QPushButton("🧪 测试 LLM 连接")
         self._btn_test_llm.setStyleSheet("""
@@ -230,6 +238,9 @@ class SettingsDialog(QDialog):
         self._llm_prompt.setPlainText(
             llm.get("user_prompt_template", DEFAULT_LLM_PROMPT)
         )
+        self._llm_punctuation_fallback.setChecked(
+            llm.get("punctuation_fallback", False)
+        )
 
     def _load_defaults(self):
         self._provider_combo.setCurrentText("index_tts")
@@ -245,6 +256,7 @@ class SettingsDialog(QDialog):
         self._llm_max_completion_tokens.setValue(2048)
         self._llm_max_len.setValue(DEFAULT_MAX_LENGTH)
         self._llm_prompt.setPlainText(DEFAULT_LLM_PROMPT)
+        self._llm_punctuation_fallback.setChecked(False)
 
     def _test_tts_connection(self):
         from PySide6.QtWidgets import QMessageBox
@@ -352,6 +364,7 @@ class SettingsDialog(QDialog):
             "max_completion_tokens": self._llm_max_completion_tokens.value(),
             "max_sentence_length": self._llm_max_len.value(),
             "user_prompt_template": prompt,
+            "punctuation_fallback": self._llm_punctuation_fallback.isChecked(),
         }
         self.accept()
 

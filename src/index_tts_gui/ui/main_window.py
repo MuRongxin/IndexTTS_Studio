@@ -66,6 +66,7 @@ class MainWindow(QMainWindow):
                 "max_completion_tokens": 2048,
                 "max_sentence_length": 40,
                 "user_prompt_template": "",
+                "punctuation_fallback": False,
             },
         }
         self._config = defaults

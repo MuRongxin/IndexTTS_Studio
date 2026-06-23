@@ -64,6 +64,21 @@ def test_create_default_migrates_split_result(tmp_path):
     assert project.sentences == ["第一句。", "第二句"]
 
 
+def test_project_save_and_load_pauses(tmp_path):
+    project_dir = str(tmp_path / "proj")
+    p = Project(
+        project_dir=project_dir,
+        name="test",
+        sentences=["A", "B"],
+        pauses=[0.5, 0.0],
+    )
+    p.save()
+
+    loaded = Project.load(project_dir)
+    assert loaded is not None
+    assert loaded.pauses == [0.5, 0.0]
+
+
 def test_project_switching_persists_sentences(tmp_path):
     """测试切换工程后句子能正确持久化到新工程。"""
     proj_a_dir = str(tmp_path / "projects" / "A")

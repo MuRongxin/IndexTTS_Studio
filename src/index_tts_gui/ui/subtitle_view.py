@@ -44,7 +44,11 @@ from index_tts_gui.core.subtitle import (
     parse_time_str,
     seconds_to_time_str,
 )
-from index_tts_gui.core.subtitler import generate_srt_from_sentences, entries_to_srt
+from index_tts_gui.core.subtitler import (
+    generate_srt_from_sentences,
+    generate_srt_from_sentences_with_pauses,
+    entries_to_srt,
+)
 from index_tts_gui.ui.audio_engine import AudioEngine
 from index_tts_gui.ui.timeline_canvas import TimelineCanvas
 
@@ -441,13 +445,19 @@ class SubtitlePanel(QWidget):
         return "output_tts"
 
     def load_entries(self, entries: List[SubtitleEntry]):
-        """载入字幕条目（与合成流水线兼容）"""
+        """载入字幕条目（与合成流水线兼容），并刷新 full_dub.wav 音频。"""
         self._track = SubtitleTrack.from_entries(entries)
         self._timeline.set_subtitle_track(self._track)
-        if self._audio_engine.is_loaded():
+
+        # 合并完成后 full_dub.wav 可能被覆盖，强制重新加载以同步波形和播放器
+        full_dub = os.path.join(self._output_dir(), "full_dub.wav")
+        if os.path.exists(full_dub):
+            self._load_audio_path(full_dub)
+        elif self._audio_engine.is_loaded():
             self._timeline.set_duration(self._audio_engine.duration)
         elif self._track.total_duration > 0:
             self._timeline.set_duration(self._track.total_duration)
+
         self.refresh_table()
         self._update_button_states()
 
@@ -814,7 +824,18 @@ class SubtitlePanel(QWidget):
                 )
                 return
 
-            entries = generate_srt_from_sentences("", sentences, wavs)
+            pauses = self._project.pauses if self._project else []
+            if pauses and len(pauses) == len(sentences):
+                entries = generate_srt_from_sentences_with_pauses(
+                    sentences, wavs, pauses
+                )
+                self._log.appendPlainText(f"📐 使用工程保存的停顿重新生成字幕: {pauses}")
+            else:
+                entries = generate_srt_from_sentences("", sentences, wavs)
+                self._log.appendPlainText(
+                    "⚠ 未找到工程停顿，按无停顿生成字幕，可能与 full_dub.wav 对不齐"
+                )
+
             self.load_entries(entries)
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.information(self, "完成", f"已重新生成 {len(entries)} 条字幕")

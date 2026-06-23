@@ -37,6 +37,7 @@ class Project:
         source_text: str = "",
         sentences: list[str] | None = None,
         audio_name: str = "",
+        pauses: list[float] | None = None,
         created_at: str | None = None,
         updated_at: str | None = None,
     ):
@@ -45,6 +46,7 @@ class Project:
         self.source_text = source_text
         self.sentences = list(sentences) if sentences else []
         self.audio_name = audio_name
+        self.pauses = list(pauses) if pauses else []
         self.created_at = created_at or datetime.now().isoformat()
         self.updated_at = updated_at or datetime.now().isoformat()
 
@@ -74,6 +76,7 @@ class Project:
             "source_text": self.source_text,
             "sentences": self.sentences,
             "audio_name": self.audio_name,
+            "pauses": self.pauses,
         }
         try:
             with open(self.project_file_path, "w", encoding="utf-8") as f:
@@ -97,6 +100,7 @@ class Project:
                 source_text=data.get("source_text", ""),
                 sentences=data.get("sentences", []),
                 audio_name=data.get("audio_name", ""),
+                pauses=data.get("pauses", []),
                 created_at=data.get("created_at"),
                 updated_at=data.get("updated_at"),
             )
@@ -165,4 +169,5 @@ class Project:
             "source_text_len": len(self.source_text),
             "sentences_count": len(self.sentences),
             "audio_name": self.audio_name,
+            "pauses_count": len(self.pauses),
         }
