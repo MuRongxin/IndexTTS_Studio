@@ -78,6 +78,7 @@ class SubtitlePanel(QWidget):
         self._setup_ui()
         self._connect_signals()
         self._refresh_project_audio()
+        self._try_auto_load_subtitles()
 
     # ── UI ──
 
@@ -308,6 +309,32 @@ class SubtitlePanel(QWidget):
             self._btn_play.setEnabled(False)
             self._btn_stop.setEnabled(False)
 
+    def _try_auto_load_subtitles(self):
+        """打开工程后自动从已有 WAV 重建字幕，优先使用存储的停顿数据。"""
+        if not self._project or not self._project.sentences:
+            return
+        output_dir = self._output_dir()
+        wavs = sorted([
+            os.path.join(output_dir, f)
+            for f in os.listdir(output_dir)
+            if f.startswith("sentence_") and f.endswith(".wav")
+        ])
+        if len(wavs) != len(self._project.sentences):
+            return
+        try:
+            pauses = self._project.pauses if self._project.pauses else None
+            if pauses and len(pauses) == len(self._project.sentences):
+                entries = generate_srt_from_sentences_with_pauses(
+                    self._project.sentences, wavs, pauses
+                )
+            else:
+                entries = generate_srt_from_sentences(
+                    "", self._project.sentences, wavs
+                )
+            self.load_entries(entries)
+        except Exception:
+            pass  # 自动加载失败不弹窗，用户可手动点击重新生成
+
     def _load_audio(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "加载音频", self._output_dir(), "音频文件 (*.wav *.mp3 *.flac)"
@@ -437,6 +464,7 @@ class SubtitlePanel(QWidget):
         self._timeline.set_playhead(0)
         self.refresh_table()
         self._refresh_project_audio()
+        self._try_auto_load_subtitles()
         self._update_button_states()
 
     def _output_dir(self) -> str:
