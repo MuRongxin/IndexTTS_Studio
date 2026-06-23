@@ -117,7 +117,7 @@ class TimelineCanvas(QWidget):
         self.SNAP_THRESHOLD = 0.15
 
         self._font = QFont("Consolas", 8)
-        self._block_font = QFont("Microsoft YaHei", 8)
+        self._block_font = QFont("Microsoft YaHei", 11)
 
     # ---- 数据设置 ----
 

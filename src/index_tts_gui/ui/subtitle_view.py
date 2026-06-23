@@ -10,7 +10,7 @@ import os
 from typing import Callable, List, Optional
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtGui import QFont, QColor, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -49,6 +49,7 @@ from index_tts_gui.core.subtitler import (
     generate_srt_from_sentences_with_pauses,
     entries_to_srt,
 )
+from index_tts_gui.core.io_ass import entries_to_ass
 from index_tts_gui.ui.audio_engine import AudioEngine
 from index_tts_gui.ui.timeline_canvas import TimelineCanvas
 
@@ -248,6 +249,19 @@ class SubtitlePanel(QWidget):
         """)
         btn_row.addWidget(self._btn_export)
 
+        self._btn_export_ass = QPushButton("📤 导出 ASS")
+        self._btn_export_ass.setEnabled(False)
+        self._btn_export_ass.setStyleSheet("""
+            QPushButton {
+                background: #7e57c2; color: white;
+                padding: 8px 16px; border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: #5e35b1; }
+            QPushButton:disabled { background: #ccc; }
+        """)
+        btn_row.addWidget(self._btn_export_ass)
+
         layout.addLayout(btn_row)
 
     def _connect_signals(self):
@@ -281,6 +295,13 @@ class SubtitlePanel(QWidget):
         self._btn_delete.clicked.connect(self._delete_selected)
         self._btn_regenerate.clicked.connect(self._regenerate)
         self._btn_export.clicked.connect(self._export_srt)
+        self._btn_export_ass.clicked.connect(self._export_ass)
+
+        # 全局快捷键
+        self._shortcut_play = QShortcut(
+            QKeySequence(" "), self, self._toggle_play
+        )
+        self._shortcut_play.setContext(Qt.ApplicationShortcut)
 
         # 时间轴
         self._timeline.playhead_moved.connect(self._on_timeline_playhead_moved)
@@ -812,6 +833,7 @@ class SubtitlePanel(QWidget):
         selected_rows = set(item.row() for item in self._table.selectedItems())
         self._btn_merge.setEnabled(len(selected_rows) >= 2)
         self._btn_export.setEnabled(self._track.count > 0)
+        self._btn_export_ass.setEnabled(self._track.count > 0)
 
     # ── 重新生成 / 导出 ──
 
@@ -883,4 +905,16 @@ class SubtitlePanel(QWidget):
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.information(
                 self, "导出成功", f"已导出 {self._track.count} 条到 {path}"
+            )
+
+    def _export_ass(self):
+        default_path = os.path.join(self._output_dir(), "full_dub.ass")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出 ASS 字幕", default_path, "ASS 文件 (*.ass)"
+        )
+        if path:
+            entries_to_ass(self._track.to_entries(), path)
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, "导出成功", f"已导出 {self._track.count} 条 ASS 字幕到 {path}，默认带 200ms Fade"
             )
