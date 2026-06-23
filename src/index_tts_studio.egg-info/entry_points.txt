@@ -1,0 +1,2 @@
+[console_scripts]
+index-tts-studio = index_tts_gui.main:main

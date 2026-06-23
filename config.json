@@ -1,0 +1,22 @@
+{
+  "provider": "index_tts",
+  "api_url": "http://117.50.216.139:8300",
+  "timeout": {
+    "check": 10,
+    "upload": 30,
+    "synthesize": 120
+  },
+  "window_geometry": "AdnQywADAAAAAAQtAAADFwAACHgAAAZyAAAEOAAAA0gAAAhtAAAGZwAAAAEAAAAAB4AAAAQ4AAADSAAACG0AAAZn",
+  "window_state": "AAAA/wAAAAD9AAAAAAAABDYAAAMJAAAABAAAAAQAAAAIAAAACPwAAAAA",
+  "llm": {
+    "enabled": true,
+    "preset": "mimo",
+    "api_url": "https://api.xiaomimimo.com/v1",
+    "api_key": "sk-cfqcln3w46i4fiq9j9g68hiarr8s5m0471z2mh8cj5idak73",
+    "model": "mimo-v2.5",
+    "timeout": 120,
+    "max_completion_tokens": 2048,
+    "max_sentence_length": 40,
+    "user_prompt_template": "你是一位中文 TTS 配音专家。请将以下文稿按语义和朗读节奏拆分成适合单次 TTS 合成的句子。                            \n     要求：                                                                                                            \n     1. 每句控制在 {max_length} 字以内（除非原文本身就是一句完整长句）；                                               \n     2. 优先在语义完整、语气停顿处拆分；                                                                               \n     3. 不要改写原文，保持原意；                                                                                       \n     4. 只输出句子，每行一句，不要编号、不要解释。                                                                     \n                                                                                                                       \n     文稿：                                                                                                            \n     {text}"
+  }
+}

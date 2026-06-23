@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "index-tts-studio"
+version = "0.1.0"
+description = "IndexTTS 桌面配音工具 — TTS 合成 + 字幕编辑"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [{name = "IndexTTS Studio"}]
+keywords = ["tts", "subtitle", "speech-synthesis", "pyside6"]
+
+dependencies = [
+    "PySide6>=6.5",
+    "requests>=2.28",
+    "openai>=1.0",
+    "librosa>=0.10",
+    "soundfile>=0.12",
+    "numpy>=1.24",
+]
+
+[project.scripts]
+index-tts-studio = "index_tts_gui.main:main"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,85 @@
+Metadata-Version: 2.4
+Name: index-tts-studio
+Version: 0.1.0
+Summary: IndexTTS 桌面配音工具 — TTS 合成 + 字幕编辑
+Author: IndexTTS Studio
+License: MIT
+Keywords: tts,subtitle,speech-synthesis,pyside6
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: PySide6>=6.5
+Requires-Dist: requests>=2.28
+Requires-Dist: librosa>=0.10
+Requires-Dist: soundfile>=0.12
+Requires-Dist: numpy>=1.24
+Dynamic: license-file
+
+# IndexTTS Studio
+
+**开源桌面配音工具** — 基于 IndexTTS API，一键将文稿合成语音，内置字幕编辑器。
+
+## 功能
+
+| 面板 | 功能 |
+|------|------|
+| 📝 文稿 | 粘贴/导入 .txt，一键拆分预览 |
+| 🎤 音色 | 拖放参考音频 → 试听 → 上传 API |
+| ⚙ 合成 | 后台调用 API，进度条实时刷新，支持中断 |
+| 📄 字幕 | **手动编辑、切分字幕** + 音频播放 + 导出 SRT |
+
+## 安装
+
+```bash
+# 创建虚拟环境
+python3 -m venv venv
+source venv/bin/activate
+
+# 安装
+pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+> 需要系统已安装 `ffmpeg`。
+
+## 启动
+
+```bash
+python run.py
+```
+
+## 使用流程
+
+1. **文稿** — 粘贴稿件，点「拆分预览」
+2. **音色** — 拖入参考音频 WAV，点「上传到 API」
+3. **合成** — 点「开始合成」，等待进度条走完
+4. **字幕** — 自动生成，可双击编辑 / 选中行点「✂ 切分」手动调整 / 「📤 导出 SRT」
+
+## 项目结构
+
+```
+src/index_tts_gui/
+├── main.py              # 入口
+├── core/                # 纯逻辑（无 UI 依赖）
+│   ├── tts_client.py    # IndexTTS API 封装
+│   ├── splitter.py      # 中文分句
+│   ├── merger.py        # ffmpeg 音频合并
+│   └── subtitler.py     # SRT 生成（能量检测停顿）
+└── ui/                  # PySide6 界面
+    ├── main_window.py   # 主窗口
+    ├── editor.py        # 文稿编辑
+    ├── voice_panel.py   # 音色管理
+    ├── synthesis_panel.py  # 合成控制
+    ├── synthesis_worker.py # 后台线程
+    └── subtitle_view.py # 字幕编辑 + 播放
+```
+
+## 依赖
+
+- **PySide6** — Qt 界面
+- **requests** — HTTP API
+- **librosa + soundfile** — 音频分析
+- **ffmpeg** — 音频合并（系统级）
+
+## License
+
+MIT

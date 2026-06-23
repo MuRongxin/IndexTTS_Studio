@@ -1,0 +1,9 @@
+venv/
+output_tts/
+__pycache__/
+*.pyc
+*.wav
+*.srt
+.DS_Store
+.reasonix/
+concat_list.txt
