@@ -216,8 +216,8 @@ class SubtitlePanel(QWidget):
         toolbar.addStretch()
         editor_layout.addLayout(toolbar)
 
-        self._info_label = QLabel("#0 | --:--:--.--- --> --:--:--.--- | -")
-        self._info_label.setStyleSheet("color: #666;")
+        self._info_label = QLabel("未选中字幕")
+        self._info_label.setStyleSheet("color: #999; font-size: 14px; padding: 4px 0;")
         editor_layout.addWidget(self._info_label)
 
         self._splitter.addWidget(editor_group)
@@ -836,12 +836,45 @@ class SubtitlePanel(QWidget):
     def _update_info_label(self):
         item = self._track.get_item(self._current_edit_index)
         if item is None:
-            self._info_label.setText("#0 | --:--:--.--- --> --:--:--.--- | -")
+            self._info_label.setText("未选中字幕")
+            self._info_label.setStyleSheet("color: #999; font-size: 14px;")
             return
-        self._info_label.setText(
-            f"#{item.index} | {seconds_to_time_str(item.start_time)} --> "
-            f"{seconds_to_time_str(item.end_time)} | {item.duration:.3f}s"
-        )
+
+        text_len = len(item.text.replace(" ", ""))
+        cps = text_len / item.duration if item.duration > 0 else 0
+
+        prev_item = self._track.get_item(self._current_edit_index - 1)
+        next_item = self._track.get_item(self._current_edit_index + 1)
+        prev_pause = item.start_time - prev_item.end_time if prev_item else None
+        next_pause = next_item.start_time - item.end_time if next_item else None
+
+        # 组装标签
+        parts = [f"{text_len} 字", f"{cps:.1f} 字/秒"]
+        if prev_pause is not None:
+            parts.append(f"前顿 {prev_pause:.2f}s")
+        if next_pause is not None:
+            parts.append(f"后顿 {next_pause:.2f}s")
+
+        warnings = []
+        if cps > 6:
+            warnings.append(f"字速 {cps:.1f} 偏快")
+        if item.duration < 0.5:
+            warnings.append(f"时长 {item.duration:.1f}s 过短")
+        if prev_item and prev_item.end_time > item.start_time + 0.01:
+            overlap = prev_item.end_time - item.start_time
+            warnings.append(f"与上句重叠 {overlap:.2f}s")
+        if next_item and item.end_time > next_item.start_time + 0.01:
+            overlap = item.end_time - next_item.start_time
+            warnings.append(f"与下句重叠 {overlap:.2f}s")
+
+        if warnings:
+            parts.append("│ " + " · ".join(f"⚠ {w}" for w in warnings))
+            self._info_label.setStyleSheet("color: #f57c00; font-weight: bold; font-size: 14px;")
+        else:
+            parts.append("│ ✅")
+            self._info_label.setStyleSheet("color: #4caf50; font-size: 14px;")
+
+        self._info_label.setText(" · ".join(parts))
 
     # ── 切分/合并/删除 ──
 
