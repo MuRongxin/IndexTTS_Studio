@@ -50,6 +50,9 @@ class SynthesisPanel(QWidget):
         self._voice_panel.audio_uploaded.connect(self.set_audio_name)
 
         self._setup_ui()
+        # 从工程恢复状态（兜底：sentences_ready 信号可能在构造时尚未连接）
+        if self._project.sentences:
+            self.set_sentences(self._project.sentences)
         self._refresh_merge_button()
 
     def _setup_ui(self):
@@ -333,6 +336,8 @@ class SynthesisPanel(QWidget):
         self._dir_label.setText(project.output_dir)
         self._audio_name = project.audio_name
         self._voice_panel.set_project(project)
+        if project.sentences:
+            self.set_sentences(project.sentences)
         self._refresh_merge_button()
 
     def get_output_dir(self) -> str:

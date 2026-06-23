@@ -31,12 +31,36 @@ class VoicePanel(QWidget):
 
         self._setup_ui()
         self._load_default_audio()
+        self._restore_from_project()
 
     def _load_default_audio(self):
         """启动时默认加载项目目录下的参考音频。"""
         default = "作为愚人众的十一执行官.wav"
         if os.path.exists(default):
             self._load_audio(default)
+
+    def _restore_from_project(self):
+        """从工程恢复已记录的音频名，尝试在常见位置找到文件并加载。"""
+        if not self._project or not self._project.audio_name:
+            return
+        stored_name = self._project.audio_name
+        # 如果已加载的就是工程记录的音频，不需要恢复
+        if self._audio_name == stored_name and self._audio_path:
+            return
+        # 尝试在常见位置查找
+        candidates = [
+            os.path.join(os.getcwd(), stored_name),
+            os.path.join(self._project.project_dir, stored_name),
+            os.path.join(self._project.output_dir, stored_name),
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                self._load_audio(path)
+                return
+        # 文件找不到时，至少记录名称并启用上传状态提示
+        self._audio_name = stored_name
+        self._file_label.setText(f"📁 {stored_name} (文件缺失)")
+        self._btn_upload.setEnabled(True)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -206,6 +230,7 @@ class VoicePanel(QWidget):
     def set_project(self, project: Project):
         """切换工程时更新引用（默认音频保留在项目根目录）。"""
         self._project = project
+        self._restore_from_project()
 
     def get_audio_name(self) -> str:
         return self._audio_name
