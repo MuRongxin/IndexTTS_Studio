@@ -238,30 +238,43 @@ class SubtitleTrack:
 
     @staticmethod
     def preview_split(text: str, ratio: float) -> tuple[str, str]:
-        """按比例预览切分文本，返回 (前半, 后半)。"""
+        """按比例预览切分文本，返回 (前半, 后半)。
+
+        以字符数比例为基准，优先在空格或标点处切分，但只在边界位置
+        不会导致比例严重偏离时才使用边界；否则回退到字符级切分，使
+        前后视觉长度尽量接近目标比例。
+        """
         ratio = max(0.0, min(1.0, ratio))
+        if not text:
+            return "", ""
+
         punct = "，。、；：！？,.;:!?"
+        total = len(text)
+        target = max(1, min(total - 1, round(total * ratio)))
 
-        words = text.split()
-        if len(words) > 1:
-            split_word_idx = max(1, min(len(words) - 1, round(len(words) * ratio)))
-            first_text = " ".join(words[:split_word_idx])
-            second_text = " ".join(words[split_word_idx:])
-        else:
-            mid = max(1, min(len(text) - 1, round(len(text) * ratio)))
-            best = mid
-            best_score = 0
-            for offset in range(-10, 11):
-                pos = mid + offset
-                if 0 < pos < len(text) and text[pos] in punct:
-                    score = abs(offset)
-                    if score < best_score or best_score == 0:
-                        best_score = score
-                        best = pos + 1
-            first_text = text[:best]
-            second_text = text[best:]
+        # 第一步：找离目标位置最近的空格/标点边界
+        best_boundary_pos = -1
+        best_boundary_dist = float("inf")
+        for i, ch in enumerate(text):
+            if i == 0 or i >= total:
+                continue
+            if ch != " " and ch not in punct:
+                continue
+            dist = abs(i - target)
+            if dist < best_boundary_dist:
+                best_boundary_dist = dist
+                best_boundary_pos = i
 
-        second_text = second_text.lstrip(punct + " ")
+        # 第二步：如果最近边界导致比例偏差不超过 8%，则使用边界
+        BOUNDARY_RATIO_TOLERANCE = 0.08
+        best_pos = target
+        if best_boundary_pos > 0:
+            boundary_ratio = best_boundary_pos / total
+            if abs(boundary_ratio - ratio) <= BOUNDARY_RATIO_TOLERANCE:
+                best_pos = best_boundary_pos
+
+        first_text = text[:best_pos].rstrip(punct + " ")
+        second_text = text[best_pos:].lstrip(punct + " ")
         return first_text, second_text
 
     def merge_items(self, index1: int, index2: int) -> None:
