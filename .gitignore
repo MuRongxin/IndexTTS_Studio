@@ -8,3 +8,4 @@ __pycache__/
 .reasonix/
 concat_list.txt
 config.json
+split_result.txt
