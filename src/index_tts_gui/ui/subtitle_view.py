@@ -125,7 +125,7 @@ class SubtitlePanel(QWidget):
         self._table.setColumnCount(5)
         self._table.setHorizontalHeaderLabels(["序号", "开始时间", "结束时间", "时长", "文本"])
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._table.setAlternatingRowColors(True)
         self._table.setSortingEnabled(True)
 
@@ -148,7 +148,8 @@ class SubtitlePanel(QWidget):
 
         self._text_edit = QTextEdit()
         self._text_edit.setAcceptRichText(False)
-        self._text_edit.setMinimumHeight(80)
+        self._text_edit.setMinimumHeight(50)
+        self._text_edit.setMaximumHeight(80)
         self._text_edit.setPlaceholderText("选中字幕后在此编辑文本...")
         editor_layout.addWidget(self._text_edit)
 
@@ -177,7 +178,7 @@ class SubtitlePanel(QWidget):
         toolbar.addWidget(QLabel("字号:"))
         self._size_spin = QSpinBox()
         self._size_spin.setRange(8, 200)
-        self._size_spin.setValue(24)
+        self._size_spin.setValue(25)
         toolbar.addWidget(self._size_spin)
 
         self._color_btn = QPushButton()
@@ -309,6 +310,7 @@ class SubtitlePanel(QWidget):
         self._timeline.subtitle_moved.connect(self._on_timeline_subtitle_moved)
         self._timeline.double_click_time.connect(self._on_timeline_double_click)
         self._timeline.subtitle_deleted.connect(self._on_timeline_subtitle_deleted)
+        self._timeline.razor_split.connect(self._on_razor_split)
 
     # ── 音频 ──
 
@@ -440,8 +442,25 @@ class SubtitlePanel(QWidget):
             self._player.setPosition(int(time * 1000))
         self._timeline.set_playhead(time)
 
-    def _on_timeline_subtitle_selected(self, index: int):
-        self.select_row(index)
+    def _on_timeline_subtitle_selected(self, indices: list[int]):
+        """时间轴选择变化时同步到表格。"""
+        self._block_signals = True
+        try:
+            self._table.clearSelection()
+            for idx in indices:
+                target_row = -1
+                for row in range(self._table.rowCount()):
+                    idx_item = self._table.item(row, 0)
+                    if idx_item and int(idx_item.text()) == idx:
+                        target_row = row
+                        break
+                if target_row >= 0:
+                    self._table.selectRow(target_row)
+            if indices:
+                self._current_edit_index = indices[-1]
+                self.select_row(indices[-1])
+        finally:
+            self._block_signals = False
 
     def _on_timeline_subtitle_moved(self, index: int, start: float, end: float):
         item = self._track.get_item(index)
@@ -464,11 +483,25 @@ class SubtitlePanel(QWidget):
         self._timeline.set_subtitle_track(self._track)
         self.select_row(new_item.index)
 
-    def _on_timeline_subtitle_deleted(self, index: int):
-        self._track.remove_item(index)
+    def _on_timeline_subtitle_deleted(self, indices: list[int]):
+        for idx in sorted(indices, reverse=True):
+            try:
+                self._track.remove_item(idx)
+            except (IndexError, ValueError):
+                continue
         self.refresh_table()
         self._timeline.set_subtitle_track(self._track)
         self._update_button_states()
+
+    def _on_razor_split(self, index: int, split_time: float):
+        """剃刀工具：在时间轴点击位置切分字幕块。"""
+        try:
+            self._track.split_item(index, split_time)
+        except (IndexError, ValueError):
+            return
+        self.refresh_table()
+        self._timeline.set_subtitle_track(self._track)
+        self.select_row(index)
 
     # ── 工程与数据加载 ──
 
@@ -583,29 +616,33 @@ class SubtitlePanel(QWidget):
     def _on_table_selection_changed(self):
         if self._block_signals:
             return
-        selected = self._table.selectedItems()
-        if not selected:
+        rows = set(item.row() for item in self._table.selectedItems())
+        indices = []
+        for row in rows:
+            idx_item = self._table.item(row, 0)
+            if idx_item is None:
+                continue
+            try:
+                indices.append(int(idx_item.text()))
+            except ValueError:
+                continue
+
+        if not indices:
             self._current_edit_index = -1
+            self._timeline.clear_selection()
             self._update_button_states()
             return
 
-        row = selected[0].row()
-        idx_item = self._table.item(row, 0)
-        if idx_item is None:
-            return
-        try:
-            index = int(idx_item.text())
-        except ValueError:
-            return
-
-        self._current_edit_index = index
-        item = self._track.get_item(index)
+        self._current_edit_index = max(indices)
+        item = self._track.get_item(self._current_edit_index)
         if item is not None:
             self._text_edit.setPlainText(item.text)
             self._load_style_controls(item)
             self._update_info_label()
 
-        self._timeline.select_subtitle(index)
+        self._timeline.selected_index = self._current_edit_index
+        self._timeline.selected_indices = set(indices)
+        self._timeline.update()
         self._update_button_states()
 
     def _on_time_cell_changed(self, item: QTableWidgetItem):
@@ -786,43 +823,51 @@ class SubtitlePanel(QWidget):
         self.select_row(self._current_edit_index)
 
     def _merge_selected(self):
-        rows = set()
-        for item in self._table.selectedItems():
-            rows.add(item.row())
-        if len(rows) < 2:
-            return
-        indices = []
-        for row in rows:
+        """合并选中的多个字幕块（表格或时间轴选择均可）。"""
+        # 合并表格和时间轴的选择
+        indices = set()
+        for row in set(item.row() for item in self._table.selectedItems()):
             idx_item = self._table.item(row, 0)
             if idx_item:
                 try:
-                    indices.append(int(idx_item.text()))
+                    indices.add(int(idx_item.text()))
                 except ValueError:
                     pass
+        indices.update(self._timeline.get_selected_indices())
+
         if len(indices) < 2:
             return
-        indices.sort()
-        # 两两合并（从后往前避免索引变化）
-        first = indices[0]
-        for idx in reversed(indices[1:]):
-            try:
-                self._track.merge_items(first, idx)
-            except (IndexError, ValueError):
-                continue
+
+        try:
+            first = self._track.merge_multiple(list(indices))
+        except (IndexError, ValueError):
+            return
         self.refresh_table()
         self._timeline.set_subtitle_track(self._track)
+        self._timeline.clear_selection()
         self.select_row(first)
 
     def _delete_selected(self):
-        if self._current_edit_index < 0:
+        indices = set()
+        for row in set(item.row() for item in self._table.selectedItems()):
+            idx_item = self._table.item(row, 0)
+            if idx_item:
+                try:
+                    indices.add(int(idx_item.text()))
+                except ValueError:
+                    pass
+        indices.update(self._timeline.get_selected_indices())
+        if not indices:
             return
-        try:
-            self._track.remove_item(self._current_edit_index)
-        except (IndexError, ValueError):
-            return
+        for idx in sorted(indices, reverse=True):
+            try:
+                self._track.remove_item(idx)
+            except (IndexError, ValueError):
+                continue
         self._current_edit_index = -1
         self.refresh_table()
         self._timeline.set_subtitle_track(self._track)
+        self._timeline.clear_selection()
         self._update_button_states()
 
     def _update_button_states(self):
@@ -830,8 +875,9 @@ class SubtitlePanel(QWidget):
         self._btn_split.setEnabled(has_selection)
         self._btn_delete.setEnabled(has_selection)
 
-        selected_rows = set(item.row() for item in self._table.selectedItems())
-        self._btn_merge.setEnabled(len(selected_rows) >= 2)
+        selected_count = len(set(item.row() for item in self._table.selectedItems()))
+        selected_count = max(selected_count, len(self._timeline.get_selected_indices()))
+        self._btn_merge.setEnabled(selected_count >= 2)
         self._btn_export.setEnabled(self._track.count > 0)
         self._btn_export_ass.setEnabled(self._track.count > 0)
 
@@ -879,12 +925,8 @@ class SubtitlePanel(QWidget):
                 entries = generate_srt_from_sentences_with_pauses(
                     sentences, wavs, pauses
                 )
-                self._log.appendPlainText(f"📐 使用工程保存的停顿重新生成字幕: {pauses}")
             else:
                 entries = generate_srt_from_sentences("", sentences, wavs)
-                self._log.appendPlainText(
-                    "⚠ 未找到工程停顿，按无停顿生成字幕，可能与 full_dub.wav 对不齐"
-                )
 
             self.load_entries(entries)
             from PySide6.QtWidgets import QMessageBox

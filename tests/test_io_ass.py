@@ -31,5 +31,5 @@ def test_entries_to_ass(tmp_path):
     assert "[V4+ Styles]" in content
     assert "[Events]" in content
     assert "Dialogue: 0,0:00:01.00,0:00:03.50,Default,,0,0,0,,{\\fad(100,200)}第一句" in content
-    assert "&HFF0000&" in content  # 蓝色描边 BBGGRR
+    assert "&HFFB108&" in content  # 蓝色描边 #08B1FF 的 BBGGRR 表示
     assert "{\\fad(100,200)}第二句\\N换行" in content

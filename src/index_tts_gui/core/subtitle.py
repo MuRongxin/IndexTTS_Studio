@@ -38,7 +38,7 @@ class SubtitleStyle:
     """
 
     font_name: str = "Microsoft YaHei"
-    font_size: int = 24
+    font_size: int = 25
     primary_color: str = "#FFFFFF"
     outline_color: str = "#000000"
     back_color: str = "#00000000"
@@ -219,28 +219,9 @@ class SubtitleTrack:
         original_end_time = item.end_time
         duration = item.duration
         ratio = (split_time - item.start_time) / duration if duration > 0 else 0.5
+        ratio = max(0.0, min(1.0, ratio))
 
-        text = item.text
-        # 中文优先按标点切分，否则按字数比例
-        words = text.split()
-        if len(words) > 1:
-            split_word_idx = max(1, min(len(words) - 1, int(len(words) * ratio)))
-            first_text = " ".join(words[:split_word_idx])
-            second_text = " ".join(words[split_word_idx:])
-        else:
-            mid = max(1, min(len(text) - 1, int(len(text) * ratio)))
-            # 尝试在中文字符边界处微调
-            for offset in range(8):
-                pos = mid + offset
-                if pos < len(text) and text[pos] in "，。、；：！？":
-                    mid = pos + 1
-                    break
-                pos = mid - offset
-                if pos >= 0 and text[pos] in "，。、；：！？":
-                    mid = pos + 1
-                    break
-            first_text = text[:mid]
-            second_text = text[mid:]
+        first_text, second_text = self.preview_split(item.text, ratio)
 
         item.text = first_text
         item.end_time = split_time
@@ -254,6 +235,34 @@ class SubtitleTrack:
         )
         self.items.insert(idx_0based + 1, new_item)
         self.reindex()
+
+    @staticmethod
+    def preview_split(text: str, ratio: float) -> tuple[str, str]:
+        """按比例预览切分文本，返回 (前半, 后半)。"""
+        ratio = max(0.0, min(1.0, ratio))
+        punct = "，。、；：！？,.;:!?"
+
+        words = text.split()
+        if len(words) > 1:
+            split_word_idx = max(1, min(len(words) - 1, round(len(words) * ratio)))
+            first_text = " ".join(words[:split_word_idx])
+            second_text = " ".join(words[split_word_idx:])
+        else:
+            mid = max(1, min(len(text) - 1, round(len(text) * ratio)))
+            best = mid
+            best_score = 0
+            for offset in range(-10, 11):
+                pos = mid + offset
+                if 0 < pos < len(text) and text[pos] in punct:
+                    score = abs(offset)
+                    if score < best_score or best_score == 0:
+                        best_score = score
+                        best = pos + 1
+            first_text = text[:best]
+            second_text = text[best:]
+
+        second_text = second_text.lstrip(punct + " ")
+        return first_text, second_text
 
     def merge_items(self, index1: int, index2: int) -> None:
         """合并两条字幕（按序号）"""
@@ -278,6 +287,38 @@ class SubtitleTrack:
 
         del self.items[idx2]
         self.reindex()
+
+    def merge_multiple(self, indices: list[int]) -> int:
+        """合并多条字幕，按时间顺序拼接文本，返回合并后项目的序号（1-based）。"""
+        if len(indices) < 2:
+            raise ValueError("Need at least two items to merge")
+        valid = [i for i in indices if 1 <= i <= len(self.items)]
+        if len(valid) < 2:
+            raise ValueError("Not enough valid indices to merge")
+        # 按开始时间排序，保证文本顺序
+        sorted_items = sorted(
+            ((i, self.items[i - 1]) for i in valid),
+            key=lambda x: x[1].start_time,
+        )
+        first_idx, first_item = sorted_items[0]
+        last_item = sorted_items[-1][1]
+
+        text_parts = []
+        for _, item in sorted_items:
+            part = item.text.strip()
+            if part:
+                text_parts.append(part)
+        first_item.end_time = last_item.end_time
+        first_item.text = " ".join(text_parts)
+
+        # 删除其余项目（从后往前避免索引变化）
+        to_delete = sorted(
+            (i for i, _ in sorted_items[1:]), reverse=True
+        )
+        for idx in to_delete:
+            del self.items[idx - 1]
+        self.reindex()
+        return self.items.index(first_item) + 1
 
     def __len__(self) -> int:
         return len(self.items)

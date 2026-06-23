@@ -49,6 +49,17 @@ def test_track_get_item_at_time():
     assert track.get_item_at_time(0.5) is None
 
 
+def test_preview_split():
+    first, second = SubtitleTrack.preview_split("前半段文字后半段文字", 0.4)
+    assert first == "前半段文"
+    assert second == "字后半段文字"
+
+    # 英文按单词比例
+    first, second = SubtitleTrack.preview_split("hello world from python", 0.5)
+    assert first == "hello world"
+    assert second == "from python"
+
+
 def test_track_split_item():
     track = SubtitleTrack()
     track.add_item(SubtitleItem(0, 0.0, 10.0, "hello world"))
@@ -61,6 +72,20 @@ def test_track_split_item():
     assert track.items[1].text == "world"
 
 
+def test_track_merge_three_items():
+    track = SubtitleTrack()
+    track.add_item(SubtitleItem(0, 0.0, 2.0, "A"))
+    track.add_item(SubtitleItem(0, 2.0, 4.0, "B"))
+    track.add_item(SubtitleItem(0, 4.0, 6.0, "C"))
+    # 使用 merge_multiple，即使索引乱序也按时间顺序拼接
+    first = track.merge_multiple([1, 3, 2])
+    assert track.count == 1
+    assert first == 1
+    assert track.items[0].text == "A B C"
+    assert track.items[0].start_time == 0.0
+    assert track.items[0].end_time == 6.0
+
+
 def test_track_merge_items():
     track = SubtitleTrack()
     track.add_item(SubtitleItem(0, 0.0, 2.0, "hello"))
@@ -71,6 +96,28 @@ def test_track_merge_items():
     assert track.items[0].start_time == 0.0
     assert track.items[0].end_time == 5.0
     assert track.items[0].text == "hello world"
+
+
+def test_track_merge_multiple():
+    track = SubtitleTrack()
+    track.add_item(SubtitleItem(0, 0.0, 2.0, "A"))
+    track.add_item(SubtitleItem(0, 2.0, 4.0, "B"))
+    track.add_item(SubtitleItem(0, 4.0, 6.0, "C"))
+    track.add_item(SubtitleItem(0, 6.0, 8.0, "D"))
+
+    # 隔选 1 和 3 也应合并为一个，文本按时间顺序
+    first = track.merge_multiple([1, 3])
+    assert track.count == 3
+    assert first == 1
+    merged = track.items[first - 1]
+    assert merged.text == "A C"
+    assert merged.start_time == 0.0
+    assert merged.end_time == 6.0
+
+    # 合并 1、2、3（当前索引），结果应包含全部四项
+    first = track.merge_multiple([1, 2, 3])
+    assert track.count == 1
+    assert track.items[0].text == "A C B D"
 
 
 def test_track_remove_item():

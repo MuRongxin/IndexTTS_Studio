@@ -48,10 +48,11 @@ from index_tts_gui.ui.audio_engine import AudioEngine
 class TimelineCanvas(QWidget):
 
     playhead_moved = Signal(float)       # 播放头被手动移动
-    subtitle_selected = Signal(int)      # 选中字幕（index）
+    subtitle_selected = Signal(list)     # 选中字幕 index 列表
     subtitle_moved = Signal(int, float, float)  # 字幕移动（index, new_start, new_end）
     double_click_time = Signal(float)    # 双击时间点
-    subtitle_deleted = Signal(int)       # 删除字幕（index）
+    subtitle_deleted = Signal(list)      # 删除字幕 index 列表
+    razor_split = Signal(int, float)     # 剃刀切分（index, split_time）
 
     HEADER_HEIGHT = 30
     WAVEFORM_HEIGHT = 80
@@ -110,14 +111,21 @@ class TimelineCanvas(QWidget):
         self._has_dragged = False
 
         self.selected_index = -1
+        self.selected_indices: set[int] = set()
         self.hover_index = -1
         self.hover_edge: Optional[str] = None
         self.waveform_visible = True
         self.snap_enabled = True
         self.SNAP_THRESHOLD = 0.15
+        self.tool_mode = "select"  # "select" | "razor"
+
+        # 剃刀工具悬浮预览
+        self._razor_preview_pos: Optional[QPoint] = None
+        self._razor_preview_text: tuple[str, str] = ("", "")
 
         self._font = QFont("Consolas", 8)
         self._block_font = QFont("Microsoft YaHei", 11)
+        self._tooltip_font = QFont("Microsoft YaHei", 9)
 
     # ---- 数据设置 ----
 
@@ -170,6 +178,7 @@ class TimelineCanvas(QWidget):
             self._draw_waveform(painter)
         self._draw_subtitle_blocks(painter)
         self._draw_playhead(painter)
+        self._draw_razor_preview(painter)
 
         painter.end()
 
@@ -363,7 +372,7 @@ class TimelineCanvas(QWidget):
                 )
             painter.setBrush(QBrush(color))
 
-            if idx == self.selected_index:
+            if idx in self.selected_indices:
                 pen = QPen(self.COLOR_SELECTION)
                 pen.setWidth(2)
                 painter.setPen(pen)
@@ -389,7 +398,7 @@ class TimelineCanvas(QWidget):
                     Qt.AlignLeft | Qt.AlignVCenter, text,
                 )
 
-            if idx == self.selected_index or idx == self.hover_index:
+            if idx in self.selected_indices or idx == self.hover_index:
                 painter.setPen(Qt.NoPen)
                 painter.setBrush(QBrush(self.COLOR_HANDLE))
                 left_handle = QRect(int(x), track_y + 2, self.HANDLE_WIDTH, track_height - 4)
@@ -433,6 +442,44 @@ class TimelineCanvas(QWidget):
             Qt.AlignCenter, time_str,
         )
 
+    def _draw_razor_preview(self, painter: QPainter):
+        """剃刀工具悬浮预览：显示切分后的前后文本。"""
+        if (
+            self.tool_mode != "razor"
+            or not self._razor_preview_text[0]
+            or self._razor_preview_pos is None
+        ):
+            return
+
+        first_text, second_text = self._razor_preview_text
+        lines = [
+            f"前: {first_text[:30]}{'...' if len(first_text) > 30 else ''}",
+            f"后: {second_text[:30]}{'...' if len(second_text) > 30 else ''}",
+        ]
+
+        painter.setFont(self._tooltip_font)
+        fm = QFontMetrics(self._tooltip_font)
+        line_height = fm.height() + 4
+        max_width = max(fm.horizontalAdvance(line) for line in lines) + 16
+        box_height = line_height * len(lines) + 12
+
+        px = self._razor_preview_pos.x() + 16
+        py = self._razor_preview_pos.y() + 16
+        # 避免超出右边界
+        if px + max_width > self.width():
+            px = self.width() - max_width - 8
+        if py + box_height > self.height():
+            py = self.height() - box_height - 8
+
+        bg_rect = QRect(px, py, max_width, box_height)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(45, 45, 45, 230)))
+        painter.drawRoundedRect(bg_rect, 4, 4)
+
+        painter.setPen(QPen(QColor(200, 200, 200)))
+        for i, line in enumerate(lines):
+            painter.drawText(px + 8, py + 8 + i * line_height, max_width - 16, line_height, Qt.AlignLeft | Qt.AlignVCenter, line)
+
     # ---- 鼠标交互 ----
 
     def mousePressEvent(self, event: QMouseEvent):
@@ -453,11 +500,32 @@ class TimelineCanvas(QWidget):
         if self.TRACK_Y_OFFSET <= y < self.TRACK_Y_OFFSET + self.TRACK_HEIGHT:
             hit_index, hit_edge = self._hit_test_subtitle(x, y)
 
-        if hit_index >= 0:
-            self.selected_index = hit_index
-            self.subtitle_selected.emit(hit_index)
+        # 剃刀工具：点击字幕块直接切分
+        if self.tool_mode == "razor" and hit_index >= 0:
+            click_time = self._x_to_time(x)
             item = self.subtitle_track[hit_index - 1]
-            if item:
+            if item and item.start_time < click_time < item.end_time:
+                self.razor_split.emit(hit_index, click_time)
+            return
+
+        if hit_index >= 0:
+            ctrl_pressed = event.modifiers() & Qt.ControlModifier
+            if ctrl_pressed:
+                # Ctrl+点击：多选切换
+                if hit_index in self.selected_indices:
+                    self.selected_indices.discard(hit_index)
+                    if self.selected_index == hit_index:
+                        self.selected_index = max(self.selected_indices) if self.selected_indices else -1
+                else:
+                    self.selected_indices.add(hit_index)
+                    self.selected_index = hit_index
+            else:
+                self.selected_index = hit_index
+                self.selected_indices = {hit_index}
+
+            self.subtitle_selected.emit(sorted(self.selected_indices))
+            item = self.subtitle_track[hit_index - 1]
+            if item and not ctrl_pressed:
                 self.drag_subtitle_index = hit_index
                 self.drag_original_start = item.start_time
                 self.drag_original_end = item.end_time
@@ -467,10 +535,14 @@ class TimelineCanvas(QWidget):
                     self.drag_mode = "resize_right"
                 else:
                     self.drag_mode = "move_subtitle"
-            self.dragging = True
-            self.grabMouse()
+                self.dragging = True
+                self.grabMouse()
             self.update()
         else:
+            # 点击空白处：清除选择并开始平移
+            self.selected_index = -1
+            self.selected_indices.clear()
+            self.subtitle_selected.emit([])
             self.drag_mode = "pan"
             self.dragging = True
             self.grabMouse()
@@ -524,7 +596,24 @@ class TimelineCanvas(QWidget):
                 self.drag_delta_time = delta
                 self.update()
         else:
-            if self.TRACK_Y_OFFSET <= y < self.TRACK_Y_OFFSET + self.TRACK_HEIGHT:
+            if self.tool_mode == "razor":
+                self.setCursor(Qt.CrossCursor)
+                if self.TRACK_Y_OFFSET <= y < self.TRACK_Y_OFFSET + self.TRACK_HEIGHT:
+                    hit_index, _ = self._hit_test_subtitle(x, y)
+                    if hit_index >= 0:
+                        item = self.subtitle_track[hit_index - 1]
+                        split_time = self._x_to_time(x)
+                        if item.start_time < split_time < item.end_time:
+                            ratio = (split_time - item.start_time) / item.duration
+                            first, second = SubtitleTrack.preview_split(item.text, ratio)
+                            self._razor_preview_pos = QPoint(x, y)
+                            self._razor_preview_text = (first, second)
+                            self.update()
+                            return
+                self._razor_preview_pos = None
+                self._razor_preview_text = ("", "")
+                self.update()
+            elif self.TRACK_Y_OFFSET <= y < self.TRACK_Y_OFFSET + self.TRACK_HEIGHT:
                 hit_index, hit_edge = self._hit_test_subtitle(x, y)
                 self.hover_index = hit_index
                 self.hover_edge = hit_edge
@@ -589,7 +678,7 @@ class TimelineCanvas(QWidget):
             hit_index, _ = self._hit_test_subtitle(x, y)
             if hit_index >= 0:
                 self.selected_index = hit_index
-                self.subtitle_selected.emit(hit_index)
+                self.subtitle_selected.emit([hit_index])
                 return
 
         self.double_click_time.emit(max(0.0, time))
@@ -612,10 +701,20 @@ class TimelineCanvas(QWidget):
     def keyPressEvent(self, event: QKeyEvent):
         key = event.key()
 
-        if key == Qt.Key_Delete or key == Qt.Key_Backspace:
-            idx = self.delete_selected_subtitle()
-            if idx >= 0:
-                self.subtitle_deleted.emit(idx)
+        if key == Qt.Key_V:
+            self.tool_mode = "select"
+            self._razor_preview_pos = None
+            self._razor_preview_text = ("", "")
+            self.setCursor(Qt.ArrowCursor)
+            self.update()
+        elif key == Qt.Key_C:
+            self.tool_mode = "razor"
+            self.setCursor(Qt.CrossCursor)
+            self.update()
+        elif key == Qt.Key_Delete or key == Qt.Key_Backspace:
+            deleted = self.delete_selected_subtitle()
+            if deleted:
+                self.subtitle_deleted.emit(deleted)
         elif key == Qt.Key_Left:
             step = max(0.01, 1.0 / self.zoom)
             self.playhead_time = max(0.0, self.playhead_time - step)
@@ -646,6 +745,12 @@ class TimelineCanvas(QWidget):
     def enterEvent(self, event):
         self.setFocus()
         super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._razor_preview_pos = None
+        self._razor_preview_text = ("", "")
+        self.update()
+        super().leaveEvent(event)
 
     # ---- 辅助方法 ----
 
@@ -705,24 +810,38 @@ class TimelineCanvas(QWidget):
         self.refresh_waveform()
         super().resizeEvent(event)
 
-    def delete_selected_subtitle(self) -> int:
-        idx = self.selected_index
-        if idx >= 0 and self.subtitle_track:
+    def delete_selected_subtitle(self) -> list[int]:
+        """删除所有选中的字幕，返回被删除的 index 列表。"""
+        deleted = []
+        if not self.subtitle_track:
+            return deleted
+        # 从大到小删除，避免索引变化
+        for idx in sorted(self.selected_indices, reverse=True):
             try:
                 self.subtitle_track.remove_item(idx)
+                deleted.append(idx)
             except (IndexError, ValueError):
                 pass
-            self.selected_index = -1
-            self.update()
-        return idx
+        self.selected_index = -1
+        self.selected_indices.clear()
+        self.update()
+        return deleted
 
     def get_selected_subtitle_index(self) -> int:
         return self.selected_index
 
+    def get_selected_indices(self) -> list[int]:
+        return sorted(self.selected_indices)
+
     def select_subtitle(self, index: int):
         self.selected_index = index
+        if index >= 0:
+            self.selected_indices = {index}
+        else:
+            self.selected_indices.clear()
         self.update()
 
     def clear_selection(self):
         self.selected_index = -1
+        self.selected_indices.clear()
         self.update()

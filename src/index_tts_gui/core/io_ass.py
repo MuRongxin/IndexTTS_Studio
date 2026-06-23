@@ -42,7 +42,7 @@ def entries_to_ass(
     fade_in_ms: int = 100,
     fade_out_ms: int = 200,
     font_name: str = "Microsoft YaHei",
-    font_size: int = 24,
+    font_size: int = 25,
     primary_color: str = "#FFFFFF",
     outline_color: str = "#08B1FF",
     back_color: str = "#00000000",
