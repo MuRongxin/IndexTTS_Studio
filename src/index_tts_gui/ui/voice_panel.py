@@ -232,5 +232,16 @@ class VoicePanel(QWidget):
         self._project = project
         self._restore_from_project()
 
+    def reset_for_new_project(self):
+        """新建工程时清空已选音频状态（不删除项目默认音频文件）。"""
+        self._audio_path = ""
+        self._audio_name = ""
+        self._file_label.setText("未选择音频")
+        self._btn_play.setEnabled(False)
+        self._btn_upload.setEnabled(False)
+        self._upload_status.setText("")
+        self._player.stop()
+        self._player.setSource(QUrl())
+
     def get_audio_name(self) -> str:
         return self._audio_name

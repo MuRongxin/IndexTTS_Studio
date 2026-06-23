@@ -303,5 +303,17 @@ class SynthesisPanel(QWidget):
             self.set_sentences(project.sentences)
         self._refresh_merge_button()
 
+    def reset_for_new_project(self):
+        """新建工程时清空面板状态。"""
+        self._sentences = []
+        self._progress.setValue(0)
+        self._progress.setMaximum(0)
+        self._status_label.setText("等待拆分句子")
+        self._log.clear()
+        self._btn_start.setEnabled(True)
+        self._btn_stop.setEnabled(False)
+        self._btn_merge.setEnabled(False)
+        self._voice_panel.reset_for_new_project()
+
     def get_output_dir(self) -> str:
         return self._output_dir

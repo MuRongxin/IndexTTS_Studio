@@ -521,6 +521,27 @@ class SubtitlePanel(QWidget):
         self._try_auto_load_subtitles()
         self._update_button_states()
 
+    def reset_for_new_project(self):
+        """新建工程时清空字幕、音频和播放器状态。"""
+        self._stop()
+        self._audio_path = ""
+        self._audio_engine.clear()
+        self._timeline.set_audio_engine(None)
+        self._timeline.set_duration(0)
+        self._timeline.set_playhead(0)
+        self._track = SubtitleTrack()
+        self._timeline.set_subtitle_track(self._track)
+        self._current_edit_index = -1
+        self._text_edit.clear()
+        self._btn_load_audio.setText("📂 加载音频")
+        self._update_time_label(0, 0)
+        self._seek.setEnabled(False)
+        self._seek.setValue(0)
+        self._btn_play.setEnabled(False)
+        self._btn_stop.setEnabled(False)
+        self.refresh_table()
+        self._update_button_states()
+
     def _output_dir(self) -> str:
         if self._project:
             return self._project.output_dir

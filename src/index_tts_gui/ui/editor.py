@@ -292,6 +292,19 @@ class ManuscriptPanel(QWidget):
             self._editor.blockSignals(False)
             self._table.blockSignals(False)
 
+    def reset_for_new_project(self):
+        """新建工程时清空面板状态。"""
+        self._editor.blockSignals(True)
+        self._table.blockSignals(True)
+        try:
+            self._editor.clear()
+            self._load_table([])
+            self._status_label.setText(f"新建工程「{self._project.name}」")
+            self._update_stats()
+        finally:
+            self._editor.blockSignals(False)
+            self._table.blockSignals(False)
+
     def _on_text_changed(self):
         text = self._editor.toPlainText()
         self._project.source_text = text

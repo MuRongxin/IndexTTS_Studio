@@ -332,7 +332,7 @@ class MainWindow(QMainWindow):
         new_project = Project(project_dir=project_dir, name=name)
         new_project.ensure_dirs()
         new_project.save()
-        self._switch_project(new_project)
+        self._switch_project(new_project, is_new=True)
         self.status_bar.showMessage(f"已新建工程: {name}")
 
     def _open_project(self):
@@ -363,7 +363,7 @@ class MainWindow(QMainWindow):
             self._project.save()
             self.status_bar.showMessage(f"工程已保存: {self._project.name}")
 
-    def _switch_project(self, project: Project):
+    def _switch_project(self, project: Project, is_new: bool = False):
         """切换当前工程并刷新所有面板。"""
         # 先保存旧工程
         if hasattr(self, "_project") and self._project:
@@ -375,6 +375,11 @@ class MainWindow(QMainWindow):
         self.manuscript_panel.set_project(self._project)
         self.synthesis_panel.set_project(self._project)
         self.subtitle_panel.set_project(self._project)
+
+        if is_new:
+            self.manuscript_panel.reset_for_new_project()
+            self.synthesis_panel.reset_for_new_project()
+            self.subtitle_panel.reset_for_new_project()
 
         self._update_project_label()
 
