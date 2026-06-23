@@ -495,12 +495,16 @@ class SubtitlePanel(QWidget):
 
     def _on_razor_split(self, index: int, split_time: float):
         """剃刀工具：在时间轴点击位置切分字幕块。"""
+        item = self._track.get_item(index)
+        if item is None:
+            return
         try:
             self._track.split_item(index, split_time)
         except (IndexError, ValueError):
             return
         self.refresh_table()
         self._timeline.set_subtitle_track(self._track)
+        self._timeline.select_subtitle(index)
         self.select_row(index)
 
     # ── 工程与数据加载 ──
@@ -841,6 +845,7 @@ class SubtitlePanel(QWidget):
             return
         self.refresh_table()
         self._timeline.set_subtitle_track(self._track)
+        self._timeline.select_subtitle(self._current_edit_index)
         self.select_row(self._current_edit_index)
 
     def _merge_selected(self):

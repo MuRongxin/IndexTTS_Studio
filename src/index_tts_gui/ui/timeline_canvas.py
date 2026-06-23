@@ -504,7 +504,10 @@ class TimelineCanvas(QWidget):
         if self.tool_mode == "razor" and hit_index >= 0:
             click_time = self._x_to_time(x)
             item = self.subtitle_track[hit_index - 1]
-            if item and item.start_time < click_time < item.end_time:
+            if item and item.duration > 0:
+                # 避免点击在边缘导致 split_time 刚好等于起止时间
+                epsilon = min(0.05, item.duration * 0.05)
+                click_time = max(item.start_time + epsilon, min(item.end_time - epsilon, click_time))
                 self.razor_split.emit(hit_index, click_time)
             return
 
