@@ -3,7 +3,7 @@ import json
 import logging
 import os
 from PySide6.QtWidgets import (
-    QMainWindow, QStatusBar,
+    QMainWindow,
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QFrame, QStackedWidget, QSplitter,
     QSizePolicy,
@@ -17,10 +17,10 @@ from index_tts_gui.core.tts_client import (
     DEFAULT_TIMEOUT,
 )
 from index_tts_gui.ui.editor import ManuscriptPanel
-from index_tts_gui.ui.voice_panel import VoicePanel
 from index_tts_gui.ui.synthesis_panel import SynthesisPanel
 from index_tts_gui.ui.subtitle_view import SubtitlePanel
 from index_tts_gui.ui.settings_dialog import SettingsDialog
+from index_tts_gui.ui.log_status_bar import LogStatusBar, QtLogHandler
 
 CONFIG_FILE = "config.json"
 
@@ -138,8 +138,6 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage(f"创建 API 客户端失败: {e}")
             return
 
-        if hasattr(self, "voice_panel"):
-            self.voice_panel.set_client(self._client)
         if hasattr(self, "synthesis_panel"):
             self.synthesis_panel.set_client(self._client)
 
@@ -150,9 +148,13 @@ class MainWindow(QMainWindow):
     # ── UI ──
 
     def _setup_statusbar(self):
-        self.status_bar = QStatusBar()
+        self.status_bar = LogStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("就绪")
+
+        # 将日志转发到底部状态栏
+        self._qt_log_handler = QtLogHandler(self)
+        self._qt_log_handler.log_record.connect(self.status_bar.show_log_message)
+        logger.addHandler(self._qt_log_handler)
 
     def _setup_central(self):
         root = QWidget()
@@ -178,9 +180,8 @@ class MainWindow(QMainWindow):
         self._nav_buttons: list[QPushButton] = []
         nav_items = [
             ("📝 文稿", 0),
-            ("🎤 音色", 1),
-            ("⚙ 合成", 2),
-            ("📄 字幕", 3),
+            ("🎙 合成", 1),
+            ("📄 字幕", 2),
         ]
         for label, idx in nav_items:
             btn = QPushButton(label)
@@ -227,9 +228,6 @@ class MainWindow(QMainWindow):
         self.manuscript_panel = ManuscriptPanel()
         self._stack.addWidget(self.manuscript_panel)
 
-        self.voice_panel = VoicePanel()
-        self._stack.addWidget(self.voice_panel)
-
         self.synthesis_panel = SynthesisPanel()
         self._stack.addWidget(self.synthesis_panel)
 
@@ -244,9 +242,6 @@ class MainWindow(QMainWindow):
         # 信号链
         self.manuscript_panel.sentences_ready.connect(
             self.synthesis_panel.set_sentences
-        )
-        self.voice_panel.audio_uploaded.connect(
-            self.synthesis_panel.set_audio_name
         )
         self.synthesis_panel.synthesis_done.connect(self._on_synthesis_done)
 

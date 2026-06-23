@@ -9,10 +9,11 @@ from PySide6.QtCore import Qt, Signal
 
 from index_tts_gui.core.tts_client import BaseTTSClient, IndexTTSClient
 from index_tts_gui.ui.synthesis_worker import SynthesisWorker
+from index_tts_gui.ui.voice_panel import VoicePanel
 
 
 class SynthesisPanel(QWidget):
-    """合成控制：进度条 + 日志 + 启停"""
+    """合成控制：音色选择 + 进度条 + 日志 + 启停"""
 
     synthesis_done = Signal(str)  # 合成完成，输出目录路径
 
@@ -25,11 +26,18 @@ class SynthesisPanel(QWidget):
         self._output_dir: str = "output_tts"
         self._was_canceled = False
 
+        self._voice_panel = VoicePanel(self._client)
+        self._voice_panel.audio_uploaded.connect(self.set_audio_name)
+
         self._setup_ui()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        # ── 音色选择区（嵌入 VoicePanel）──
+        layout.addWidget(self._voice_panel)
 
         # 设置区
         gb = QGroupBox("合成设置")
@@ -171,6 +179,7 @@ class SynthesisPanel(QWidget):
     def set_client(self, client: BaseTTSClient):
         """外部（如 MainWindow）动态切换 API 客户端。"""
         self._client = client
+        self._voice_panel.set_client(client)
 
     def get_output_dir(self) -> str:
         return self._output_dir
