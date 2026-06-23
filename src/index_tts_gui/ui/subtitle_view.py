@@ -202,6 +202,17 @@ class SubtitlePanel(QWidget):
         self._align_combo.setCurrentIndex(0)
         toolbar.addWidget(self._align_combo)
 
+        self._btn_apply_style_all = QPushButton("应用到全部")
+        self._btn_apply_style_all.setToolTip("将当前样式应用到所有字幕")
+        self._btn_apply_style_all.setStyleSheet("""
+            QPushButton {
+                background: #2196F3; color: white;
+                padding: 4px 12px; border-radius: 4px;
+            }
+            QPushButton:hover { background: #1976D2; }
+        """)
+        toolbar.addWidget(self._btn_apply_style_all)
+
         toolbar.addStretch()
         editor_layout.addLayout(toolbar)
 
@@ -289,6 +300,7 @@ class SubtitlePanel(QWidget):
         self._color_btn.clicked.connect(self._choose_color)
         self._outline_spin.valueChanged.connect(self._on_style_changed)
         self._align_combo.currentIndexChanged.connect(self._on_style_changed)
+        self._btn_apply_style_all.clicked.connect(self._apply_style_to_all)
 
         # 按钮
         self._btn_split.clicked.connect(self._split_selected)
@@ -633,7 +645,7 @@ class SubtitlePanel(QWidget):
             if item is not None:
                 self._current_edit_index = index
                 self._text_edit.setPlainText(item.text)
-                self._load_style_controls(item)
+                self._load_style_controls()
                 self._update_info_label()
         finally:
             self._block_signals = False
@@ -662,7 +674,7 @@ class SubtitlePanel(QWidget):
         item = self._track.get_item(self._current_edit_index)
         if item is not None:
             self._text_edit.setPlainText(item.text)
-            self._load_style_controls(item)
+            self._load_style_controls()
             self._update_info_label()
 
         self._timeline.selected_index = self._current_edit_index
@@ -754,10 +766,9 @@ class SubtitlePanel(QWidget):
 
     # ── 样式 ──
 
-    def _load_style_controls(self, item: SubtitleItem):
-        style = item.style if item.style else self._track.default_style
-        if style is None:
-            return
+    def _load_style_controls(self):
+        """从全局默认样式加载样式工具栏。"""
+        style = self._track.default_style
         self._block_signals = True
         try:
             self._bold_check.setChecked(style.bold)
@@ -772,48 +783,50 @@ class SubtitlePanel(QWidget):
         finally:
             self._block_signals = False
 
-    def _on_style_changed(self):
-        if self._block_signals or self._current_edit_index < 0:
-            return
-        item = self._track.get_item(self._current_edit_index)
-        if item is None:
-            return
-        if item.style is None:
-            item.style = SubtitleStyle()
-        style = item.style
-        style.bold = self._bold_check.isChecked()
-        style.italic = self._italic_check.isChecked()
-        style.underline = self._underline_check.isChecked()
-        style.font_name = self._font_combo.currentFont().family()
-        style.font_size = self._size_spin.value()
-        style.outline_width = self._outline_spin.value()
+    def _read_style_from_controls(self) -> SubtitleStyle:
+        """从控件读取当前样式设置。"""
         align_values = [2, 1, 3, 5, 4, 6, 8, 7, 9]
-        style.alignment = align_values[self._align_combo.currentIndex()]
+        return SubtitleStyle(
+            font_name=self._font_combo.currentFont().family(),
+            font_size=self._size_spin.value(),
+            primary_color=self._color_btn.property("selected_color") or "#FFFFFF",
+            outline_color="#08B1FF",
+            bold=self._bold_check.isChecked(),
+            italic=self._italic_check.isChecked(),
+            underline=self._underline_check.isChecked(),
+            outline_width=self._outline_spin.value(),
+            alignment=align_values[self._align_combo.currentIndex()],
+        )
+
+    def _on_style_changed(self):
+        if self._block_signals:
+            return
+        self._track.default_style = self._read_style_from_controls()
+        self._timeline.update()
 
     def _choose_color(self):
-        current = QColor("#FFFFFF")
-        if self._current_edit_index >= 0:
-            item = self._track.get_item(self._current_edit_index)
-            if item is not None:
-                style = item.style if item.style else self._track.default_style
-                if style:
-                    current = QColor(style.primary_color)
+        current = QColor(self._track.default_style.primary_color)
         color = QColorDialog.getColor(current, self, "选择主色")
         if color.isValid():
             color_str = color.name()
             self._update_color_btn_icon(color_str)
-            if self._current_edit_index >= 0:
-                item = self._track.get_item(self._current_edit_index)
-                if item is not None:
-                    if item.style is None:
-                        item.style = SubtitleStyle()
-                    item.style.primary_color = color_str
+            self._track.default_style.primary_color = color_str
+            self._timeline.update()
+
+    def _apply_style_to_all(self):
+        """将当前全局样式应用到所有字幕项。"""
+        style = self._read_style_from_controls()
+        self._track.default_style = style
+        for item in self._track.items:
+            item.style = style.copy()
+        self._timeline.update()
 
     def _update_color_btn_icon(self, color_str: str):
         try:
             color = QColor(color_str)
         except Exception:
             color = QColor("#FFFFFF")
+        self._color_btn.setProperty("selected_color", color.name())
         self._color_btn.setStyleSheet(
             f"background-color: {color.name()}; border: 1px solid #888888;"
         )
@@ -981,8 +994,23 @@ class SubtitlePanel(QWidget):
             self, "导出 ASS 字幕", default_path, "ASS 文件 (*.ass)"
         )
         if path:
-            entries_to_ass(self._track.to_entries(), path)
+            style = self._track.default_style
+            entries_to_ass(
+                self._track.to_entries(), path,
+                font_name=style.font_name,
+                font_size=style.font_size,
+                primary_color=style.primary_color,
+                outline_color=style.outline_color,
+                back_color=style.back_color,
+                bold=style.bold,
+                italic=style.italic,
+                underline=style.underline,
+                outline_width=style.outline_width,
+                alignment=style.alignment,
+                fade_in_ms=style.fade_in_ms,
+                fade_out_ms=style.fade_out_ms,
+            )
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.information(
-                self, "导出成功", f"已导出 {self._track.count} 条 ASS 字幕到 {path}，默认带 200ms Fade"
+                self, "导出成功", f"已导出 {self._track.count} 条 ASS 字幕到 {path}"
             )
