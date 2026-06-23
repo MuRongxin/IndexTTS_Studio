@@ -443,7 +443,7 @@ class TimelineCanvas(QWidget):
         )
 
     def _draw_razor_preview(self, painter: QPainter):
-        """剃刀工具悬浮预览：显示切分后的前后文本。"""
+        """剃刀工具悬浮预览：单行显示切分后的前后文本。"""
         if (
             self.tool_mode != "razor"
             or not self._razor_preview_text[0]
@@ -452,33 +452,37 @@ class TimelineCanvas(QWidget):
             return
 
         first_text, second_text = self._razor_preview_text
-        lines = [
-            f"前: {first_text[:30]}{'...' if len(first_text) > 30 else ''}",
-            f"后: {second_text[:30]}{'...' if len(second_text) > 30 else ''}",
-        ]
+        first_display = first_text[:25] + ("..." if len(first_text) > 25 else "")
+        second_display = second_text[:25] + ("..." if len(second_text) > 25 else "")
+        preview_text = f"{first_display}  │  {second_display}"
 
         painter.setFont(self._tooltip_font)
         fm = QFontMetrics(self._tooltip_font)
-        line_height = fm.height() + 4
-        max_width = max(fm.horizontalAdvance(line) for line in lines) + 16
-        box_height = line_height * len(lines) + 12
+        padding_h = 12
+        padding_v = 8
+        text_width = fm.horizontalAdvance(preview_text)
+        box_width = text_width + padding_h * 2
+        box_height = fm.height() + padding_v * 2
 
         px = self._razor_preview_pos.x() + 16
         py = self._razor_preview_pos.y() + 16
         # 避免超出右边界
-        if px + max_width > self.width():
-            px = self.width() - max_width - 8
+        if px + box_width > self.width():
+            px = self.width() - box_width - 8
         if py + box_height > self.height():
             py = self.height() - box_height - 8
 
-        bg_rect = QRect(px, py, max_width, box_height)
+        bg_rect = QRect(px, py, box_width, box_height)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(QColor(45, 45, 45, 230)))
-        painter.drawRoundedRect(bg_rect, 4, 4)
+        painter.setBrush(QBrush(QColor(250, 250, 250, 240)))
+        painter.drawRoundedRect(bg_rect, 6, 6)
 
-        painter.setPen(QPen(QColor(200, 200, 200)))
-        for i, line in enumerate(lines):
-            painter.drawText(px + 8, py + 8 + i * line_height, max_width - 16, line_height, Qt.AlignLeft | Qt.AlignVCenter, line)
+        painter.setPen(QPen(QColor(30, 30, 30)))
+        painter.drawText(
+            px + padding_h, py + padding_v,
+            text_width, fm.height(),
+            Qt.AlignLeft | Qt.AlignVCenter, preview_text
+        )
 
     # ---- 鼠标交互 ----
 
