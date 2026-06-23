@@ -5,15 +5,96 @@ import re
 import numpy as np
 import librosa
 import soundfile as sf
-from dataclasses import dataclass
+
+from index_tts_gui.core.subtitle import SubtitleEntry
 
 
-@dataclass
-class SubtitleEntry:
-    index: int
-    start_sec: float
-    end_sec: float
-    text: str
+def _build_entries_for_sentence(
+    sentence: str,
+    dur: float,
+    wav_path: str,
+    start_t: float,
+    end_t: float,
+    max_chars: int,
+    entry_index: int,
+) -> tuple[list[SubtitleEntry], int]:
+    """为单句生成字幕条，返回 (entries, next_index)。"""
+    entries = []
+    if len(sentence) <= max_chars:
+        entries.append(SubtitleEntry(entry_index, start_t, end_t, sentence))
+        return entries, entry_index + 1
+
+    pauses = _detect_pauses(wav_path)
+    chunks = _split_by_pauses(sentence, pauses, max_chars)
+
+    total_cc = sum(len(c) for c in chunks)
+    chunk_start = start_t
+    for ci, c in enumerate(chunks):
+        ratio = len(c) / total_cc if total_cc > 0 else 1 / len(chunks)
+        chunk_end = chunk_start + max(ratio * dur, 0.8)
+        if ci == len(chunks) - 1:
+            chunk_end = end_t
+
+        entries.append(SubtitleEntry(entry_index, chunk_start, chunk_end, c))
+        entry_index += 1
+        chunk_start = chunk_end
+
+    return entries, entry_index
+
+
+def generate_srt_from_sentences(
+    full_audio_path: str,
+    sentences: list[str],
+    sentence_wavs: list[str],
+    max_chars: int = 24,
+) -> list[SubtitleEntry]:
+    """
+    根据已拆分好的句子生成字幕条目（句间无额外停顿）。
+
+    与 generate_srt 的区别：直接使用 sentences，不再对原文做标点分句。
+    """
+    return generate_srt_from_sentences_with_pauses(
+        sentences, sentence_wavs, None, max_chars
+    )
+
+
+def generate_srt_from_sentences_with_pauses(
+    sentences: list[str],
+    sentence_wavs: list[str],
+    pauses: list[float] | None = None,
+    max_chars: int = 24,
+) -> list[SubtitleEntry]:
+    """
+    根据已拆分好的句子以及句间停顿生成字幕条目。
+
+    Args:
+        sentences: 句子文本列表
+        sentence_wavs: 对应 WAV 路径列表
+        pauses: 每句之后的停顿秒数，长度应与 sentences 相同；
+                为 None 时表示句间无停顿
+        max_chars: 单条字幕最大字数
+    """
+    durations = [_get_duration(p) for p in sentence_wavs]
+    pauses = pauses or [0.0] * len(sentences)
+
+    entries: list[SubtitleEntry] = []
+    idx = 1
+    cumulative = 0.0
+
+    for si, (sentence, dur) in enumerate(zip(sentences, durations)):
+        start_t = cumulative
+        end_t = cumulative + dur
+
+        chunk_entries, idx = _build_entries_for_sentence(
+            sentence, dur, sentence_wavs[si], start_t, end_t, max_chars, idx
+        )
+        entries.extend(chunk_entries)
+
+        cumulative += dur
+        if si < len(pauses):
+            cumulative += pauses[si]
+
+    return entries
 
 
 def generate_srt(
@@ -40,47 +121,10 @@ def generate_srt(
     Returns:
         SubtitleEntry 列表
     """
-    # 1. 分句
     sentences = _split_manuscript(manuscript_text)
-
-    # 2. 每句时长
-    durations = [_get_duration(p) for p in sentence_wavs]
-
-    entries = []
-    idx = 1
-    cumulative = 0.0
-
-    for si, (sentence, dur) in enumerate(zip(sentences, durations)):
-        if si >= len(sentence_wavs):
-            break
-
-        start_t = cumulative
-        end_t = cumulative + dur
-
-        if len(sentence) <= max_chars:
-            entries.append(SubtitleEntry(idx, start_t, end_t, sentence))
-            idx += 1
-        else:
-            # 能量检测长句内停顿
-            wav_path = sentence_wavs[si]
-            pauses = _detect_pauses(wav_path)
-            chunks = _split_by_pauses(sentence, pauses, max_chars)
-
-            total_cc = sum(len(c) for c in chunks)
-            chunk_start = start_t
-            for ci, c in enumerate(chunks):
-                ratio = len(c) / total_cc if total_cc > 0 else 1 / len(chunks)
-                chunk_end = chunk_start + max(ratio * dur, 0.8)
-                if ci == len(chunks) - 1:
-                    chunk_end = end_t
-
-                entries.append(SubtitleEntry(idx, chunk_start, chunk_end, c))
-                idx += 1
-                chunk_start = chunk_end
-
-        cumulative += dur
-
-    return entries
+    return generate_srt_from_sentences(
+        full_audio_path, sentences, sentence_wavs, max_chars
+    )
 
 
 def entries_to_srt(entries: list[SubtitleEntry]) -> str:
