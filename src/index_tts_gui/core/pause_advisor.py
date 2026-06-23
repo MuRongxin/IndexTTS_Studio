@@ -43,7 +43,7 @@ class LLMPauseAdvisor:
         api_key: str,
         model: str,
         timeout: int = 60,
-        prompt_template: str = DEFAULT_PAUSE_PROMPT,
+        prompt_template: str | None = None,
     ):
         self._client = LLMClient(
             api_url=api_url,
@@ -51,7 +51,7 @@ class LLMPauseAdvisor:
             model=model,
             timeout=timeout,
         )
-        self._prompt_template = prompt_template
+        self._prompt_template = prompt_template or DEFAULT_PAUSE_PROMPT
 
     def advise(self, sentences: list[str]) -> list[float]:
         """

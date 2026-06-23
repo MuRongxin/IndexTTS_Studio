@@ -1,0 +1,22 @@
+{
+  "provider": "index_tts",
+  "api_url": "http://127.0.0.1:5000",
+  "timeout": {
+    "check": 5,
+    "upload": 30,
+    "synthesize": 120
+  },
+  "window_geometry": "",
+  "window_state": "",
+  "llm": {
+    "enabled": true,
+    "preset": "deepseek",
+    "api_url": "https://api.deepseek.com",
+    "api_key": "",
+    "model": "deepseek-v4-flash",
+    "timeout": 60,
+    "max_completion_tokens": 2048,
+    "max_sentence_length": 40,
+    "user_prompt_template": ""
+  }
+}

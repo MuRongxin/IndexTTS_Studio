@@ -1,4 +1,5 @@
 venv/
+projects/
 output_tts/
 __pycache__/
 *.pyc
@@ -8,4 +9,4 @@ __pycache__/
 .reasonix/
 concat_list.txt
 config.json
-split_result.txt
+index_tts_studio.log

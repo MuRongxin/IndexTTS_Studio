@@ -1,4 +1,5 @@
 """设置对话框：API 服务商、地址、超时。"""
+import re
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QComboBox, QLineEdit, QSpinBox, QPushButton,
@@ -331,7 +332,9 @@ class SettingsDialog(QDialog):
         }
 
         prompt = self._llm_prompt.toPlainText().strip()
-        if not prompt or "{text}" not in prompt or "{max_length}" not in prompt:
+        has_text = re.search(r"(?<!\{)\{text\}(?!\})", prompt) is not None
+        has_max_len = re.search(r"(?<!\{)\{max_length\}(?!\})", prompt) is not None
+        if not prompt or not has_text or not has_max_len:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(
                 self, "Prompt 模板错误",

@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QFrame, QStackedWidget, QSplitter,
-    QSizePolicy,
+    QSizePolicy, QFileDialog, QInputDialog, QMessageBox,
 )
 from PySide6.QtCore import Qt, QByteArray
 
@@ -16,6 +16,7 @@ from index_tts_gui.core.tts_client import (
     DEFAULT_API_URL,
     DEFAULT_TIMEOUT,
 )
+from index_tts_gui.core.project import Project
 from index_tts_gui.ui.editor import ManuscriptPanel
 from index_tts_gui.ui.synthesis_panel import SynthesisPanel
 from index_tts_gui.ui.subtitle_view import SubtitlePanel
@@ -35,13 +36,15 @@ class MainWindow(QMainWindow):
 
         self._client: BaseTTSClient | None = None
         self._load_config()
+        # 创建/加载默认工程
+        self._project = Project.create_default(os.getcwd())
+        logger.info("加载工程: %s", self._project.to_dict())
         self._setup_central()
-        # 启动时尝试加载上次保存的拆分结果
-        self.manuscript_panel.load_split_result()
         self._setup_statusbar()
         self._apply_stylesheet()
         self._apply_api()
         self._apply_llm_config()
+        self._update_project_label()
         self._restore_window_state()
 
     # ── 配置持久化 ──
@@ -208,6 +211,34 @@ class MainWindow(QMainWindow):
 
         sidebar_layout.addStretch()
 
+        # 工程按钮
+        project_btn_style = """
+            QPushButton {
+                text-align: left; padding: 8px 12px;
+                border: 1px solid #546e7a; border-radius: 6px;
+                color: #cfd8dc; background: transparent;
+                font-size: 13px;
+            }
+            QPushButton:hover { background: #37474f; color: #fff; }
+        """
+
+        btn_new = QPushButton("➕ 新建工程")
+        btn_new.setStyleSheet(project_btn_style)
+        btn_new.clicked.connect(self._new_project)
+        sidebar_layout.addWidget(btn_new)
+
+        btn_open = QPushButton("📂 打开工程")
+        btn_open.setStyleSheet(project_btn_style)
+        btn_open.clicked.connect(self._open_project)
+        sidebar_layout.addWidget(btn_open)
+
+        btn_save = QPushButton("💾 保存工程")
+        btn_save.setStyleSheet(project_btn_style)
+        btn_save.clicked.connect(self._save_project)
+        sidebar_layout.addWidget(btn_save)
+
+        sidebar_layout.addSpacing(8)
+
         # 设置按钮
         btn_settings = QPushButton("⚙ 设置")
         btn_settings.setStyleSheet("""
@@ -222,6 +253,14 @@ class MainWindow(QMainWindow):
         btn_settings.clicked.connect(self._open_settings)
         sidebar_layout.addWidget(btn_settings)
 
+        # 当前工程名称
+        self._project_label = QLabel("")
+        self._project_label.setAlignment(Qt.AlignCenter)
+        self._project_label.setStyleSheet(
+            "color: #90a4ae; font-size: 11px; padding-top: 6px;"
+        )
+        sidebar_layout.addWidget(self._project_label)
+
         layout.addWidget(self._sidebar)
 
         # ── 右侧内容区 ──
@@ -230,13 +269,13 @@ class MainWindow(QMainWindow):
             QSizePolicy.Expanding, QSizePolicy.Expanding
         )
 
-        self.manuscript_panel = ManuscriptPanel()
+        self.manuscript_panel = ManuscriptPanel(self._project)
         self._stack.addWidget(self.manuscript_panel)
 
-        self.synthesis_panel = SynthesisPanel()
+        self.synthesis_panel = SynthesisPanel(self._project)
         self._stack.addWidget(self.synthesis_panel)
 
-        self.subtitle_panel = SubtitlePanel()
+        self.subtitle_panel = SubtitlePanel(self._project)
         self.subtitle_panel.set_manuscript_source(
             self.manuscript_panel.get_text
         )
@@ -249,6 +288,7 @@ class MainWindow(QMainWindow):
             self.synthesis_panel.set_sentences
         )
         self.synthesis_panel.synthesis_done.connect(self._on_synthesis_done)
+        self.synthesis_panel.merge_done.connect(self._on_merge_done)
 
         self.setCentralWidget(root)
 
@@ -274,30 +314,86 @@ class MainWindow(QMainWindow):
             self._apply_llm_config()
             self.status_bar.showMessage("设置已保存")
 
+    def _update_project_label(self):
+        if hasattr(self, "_project_label") and self._project:
+            self._project_label.setText(f"工程: {self._project.name}")
+            self.setWindowTitle(f"IndexTTS Studio - {self._project.name}")
+
+    def _new_project(self):
+        name, ok = QInputDialog.getText(self, "新建工程", "工程名称:")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        project_dir = os.path.join(os.getcwd(), "projects", name)
+        if os.path.exists(project_dir):
+            QMessageBox.warning(self, "工程已存在", f"工程「{name}」已存在。")
+            return
+        new_project = Project(project_dir=project_dir, name=name)
+        new_project.ensure_dirs()
+        new_project.save()
+        self._switch_project(new_project)
+        self.status_bar.showMessage(f"已新建工程: {name}")
+
+    def _open_project(self):
+        project_dir = QFileDialog.getExistingDirectory(
+            self, "打开工程", os.path.join(os.getcwd(), "projects")
+        )
+        if not project_dir:
+            return
+        loaded = Project.load(project_dir)
+        if loaded is None:
+            # 如果目录没有 project.json，询问是否在此创建新工程
+            reply = QMessageBox.question(
+                self, "创建工程",
+                f"所选目录没有工程文件，是否在此创建新工程？\n{project_dir}"
+            )
+            if reply == QMessageBox.Yes:
+                name = os.path.basename(project_dir)
+                loaded = Project(project_dir=project_dir, name=name)
+                loaded.ensure_dirs()
+                loaded.save()
+            else:
+                return
+        self._switch_project(loaded)
+        self.status_bar.showMessage(f"已打开工程: {loaded.name}")
+
+    def _save_project(self):
+        if hasattr(self, "_project"):
+            self._project.save()
+            self.status_bar.showMessage(f"工程已保存: {self._project.name}")
+
+    def _switch_project(self, project: Project):
+        """切换当前工程并刷新所有面板。"""
+        # 先保存旧工程
+        if hasattr(self, "_project") and self._project:
+            self._project.save()
+        self._project = project
+        logger.info("切换到工程: %s", self._project.to_dict())
+
+        # 更新各面板
+        self.manuscript_panel.set_project(self._project)
+        self.synthesis_panel.set_project(self._project)
+        self.subtitle_panel.set_project(self._project)
+
+        self._update_project_label()
+
     def _on_synthesis_done(self, output_dir: str):
-        import os
-        from index_tts_gui.core.merger import merge_wavs
+        """合成完成后更新状态，由用户手动点击合并生成完整音频和字幕。"""
+        self.status_bar.showMessage(
+            f"合成完成，共 {len(self._project.sentences)} 句，可点击「合并完整音频」"
+        )
 
-        wavs = sorted([
-            os.path.join(output_dir, f)
-            for f in os.listdir(output_dir)
-            if f.startswith("sentence_") and f.endswith(".wav")
-        ])
-        if wavs:
-            merged_path = "full_dub.wav"
-            self.status_bar.showMessage("正在合并音频…")
-            merge_wavs(wavs, merged_path)
-            self.status_bar.showMessage(f"音频已合并: {merged_path}")
-
-            from index_tts_gui.core.subtitler import generate_srt
-            text = self.manuscript_panel.get_text()
-            entries = generate_srt(merged_path, text, wavs)
-            self.subtitle_panel.load_entries(entries)
-            self._set_current_page(3)
-            self.status_bar.showMessage(f"字幕已生成: {len(entries)} 条")
+    def _on_merge_done(self, entries: list):
+        """合并完成后加载字幕并跳转到字幕页。"""
+        self.subtitle_panel.load_entries(entries)
+        self._set_current_page(2)
+        self.status_bar.showMessage(f"字幕已生成并加载: {len(entries)} 条")
 
     def closeEvent(self, event):
         self._save_window_state()
+        if hasattr(self, "_project"):
+            self._project.save()
+            logger.info("工程已保存: %s", self._project.project_dir)
         super().closeEvent(event)
 
     def _apply_stylesheet(self):

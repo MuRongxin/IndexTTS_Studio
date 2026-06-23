@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 
 from index_tts_gui.core.tts_client import BaseTTSClient, IndexTTSClient
+from index_tts_gui.core.project import Project
 from index_tts_gui.core.merger import (
     collect_sentence_wavs,
     merge_wavs_with_pauses,
@@ -20,6 +21,7 @@ from index_tts_gui.core.pause_advisor import (
     LLMPauseAdvisor,
     is_configured as llm_is_configured,
 )
+from index_tts_gui.core.subtitler import generate_srt_from_sentences_with_pauses
 from index_tts_gui.ui.synthesis_worker import SynthesisWorker
 from index_tts_gui.ui.voice_panel import VoicePanel
 
@@ -31,18 +33,20 @@ class SynthesisPanel(QWidget):
     """合成控制：音色选择 + 进度条 + 日志 + 启停"""
 
     synthesis_done = Signal(str)  # 合成完成，输出目录路径
+    merge_done = Signal(list)     # 合并完成，字幕条目列表
 
-    def __init__(self, client: BaseTTSClient | None = None):
+    def __init__(self, project: Project, client: BaseTTSClient | None = None):
         super().__init__()
+        self._project = project
         self._client = client or IndexTTSClient()
         self._worker: SynthesisWorker | None = None
         self._sentences: list[str] = []
-        self._audio_name: str = ""
-        self._output_dir: str = "output_tts"
+        self._audio_name: str = project.audio_name
+        self._output_dir: str = project.output_dir
         self._was_canceled = False
         self._llm_cfg: dict = {}
 
-        self._voice_panel = VoicePanel(self._client)
+        self._voice_panel = VoicePanel(self._project, self._client)
         self._voice_panel.audio_uploaded.connect(self.set_audio_name)
 
         self._setup_ui()
@@ -60,15 +64,11 @@ class SynthesisPanel(QWidget):
         gb = QGroupBox("合成设置")
         gb_layout = QHBoxLayout(gb)
 
-        gb_layout.addWidget(QLabel("输出目录:"))
-        self._dir_label = QLabel("output_tts/")
+        gb_layout.addWidget(QLabel("工程输出目录:"))
+        self._dir_label = QLabel(self._project.output_dir)
         self._dir_label.setStyleSheet("font-weight: bold;")
+        self._dir_label.setToolTip("合成输出保存在当前工程文件夹内")
         gb_layout.addWidget(self._dir_label)
-
-        btn_dir = QPushButton("…")
-        btn_dir.setFixedWidth(30)
-        btn_dir.clicked.connect(self._choose_dir)
-        gb_layout.addWidget(btn_dir)
 
         gb_layout.addStretch()
         layout.addWidget(gb)
@@ -159,6 +159,8 @@ class SynthesisPanel(QWidget):
 
     def set_audio_name(self, name: str):
         self._audio_name = name
+        self._project.audio_name = name
+        self._project.save()
 
     def set_llm_config(self, cfg: dict):
         """外部注入 LLM 配置，用于智能停顿建议。"""
@@ -169,12 +171,6 @@ class SynthesisPanel(QWidget):
         has_wavs = bool(collect_sentence_wavs(self._output_dir))
         has_sentences = bool(self._sentences)
         self._btn_merge.setEnabled(has_wavs and has_sentences)
-
-    def _choose_dir(self):
-        path = QFileDialog.getExistingDirectory(self, "选择输出目录")
-        if path:
-            self._output_dir = path
-            self._dir_label.setText(path)
 
     def _start(self):
         if not self._sentences:
@@ -307,9 +303,20 @@ class SynthesisPanel(QWidget):
             if pauses:
                 merge_wavs_with_custom_pauses(wavs, pauses, output_path)
             else:
-                merge_wavs_with_pauses(wavs, self._sentences, output_path)
+                # 回退到标点规则，同时得到 pauses 用于字幕对齐
+                from index_tts_gui.core.merger import _compute_pauses
+                pauses = _compute_pauses(self._sentences)
+                merge_wavs_with_custom_pauses(wavs, pauses, output_path)
+
             self._log_msg(f"✓ 已生成完整音频: {output_path}")
             self._status_label.setText(f"完整音频已生成: {output_path}")
+
+            # 用同一组 pauses 生成字幕，保证时间轴对齐
+            entries = generate_srt_from_sentences_with_pauses(
+                self._sentences, wavs, pauses
+            )
+            self._log_msg(f"✓ 已生成字幕: {len(entries)} 条")
+            self.merge_done.emit(entries)
         except Exception as e:
             logger.exception("合并完整音频失败")
             self._log_msg(f"✗ 合并失败: {e}")
@@ -318,6 +325,15 @@ class SynthesisPanel(QWidget):
         """外部（如 MainWindow）动态切换 API 客户端。"""
         self._client = client
         self._voice_panel.set_client(client)
+
+    def set_project(self, project: Project):
+        """切换工程时刷新输出目录和相关状态。"""
+        self._project = project
+        self._output_dir = project.output_dir
+        self._dir_label.setText(project.output_dir)
+        self._audio_name = project.audio_name
+        self._voice_panel.set_project(project)
+        self._refresh_merge_button()
 
     def get_output_dir(self) -> str:
         return self._output_dir

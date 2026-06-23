@@ -3,12 +3,14 @@ import sys
 import os
 
 import pytest
+import tempfile
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from index_tts_gui.ui.editor import ManuscriptPanel, SentenceLineEdit
+from index_tts_gui.core.project import Project
 
 
 @pytest.fixture(scope="session")
@@ -20,8 +22,10 @@ def app():
 
 
 @pytest.fixture
-def panel(app):
-    p = ManuscriptPanel()
+def panel(app, tmp_path):
+    project_dir = tmp_path / "test_project"
+    project = Project(project_dir=str(project_dir))
+    p = ManuscriptPanel(project)
     p.show()
     return p
 

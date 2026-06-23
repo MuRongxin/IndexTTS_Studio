@@ -217,11 +217,11 @@ class LLMSplitter(BaseSplitter):
                 0, {"role": "system", "content": self.system_prompt}
             )
 
-        # MiMo 等思考模型会把部分 token 用于推理，长文本时需要更多输出配额
-        # 按文本长度动态调整，确保有充足 token 用于生成结果
+        # MiMo 等思考模型会把大量 token 用于内部推理，输出配额需要给得很足。
+        # 按文本长度动态调整，保底 4096，上限 8192。
         dynamic_max_tokens = max(
-            self.max_completion_tokens,
-            min(8192, int(len(stripped) * 2.5) + 1024),
+            4096,
+            min(8192, int(len(stripped) * 4) + 2048),
         )
 
         logger.info(

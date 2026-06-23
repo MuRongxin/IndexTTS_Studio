@@ -9,6 +9,7 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 
 from index_tts_gui.core.tts_client import BaseTTSClient, IndexTTSClient
+from index_tts_gui.core.project import Project
 from index_tts_gui.ui.voice_upload_worker import VoiceUploadWorker
 
 
@@ -17,8 +18,9 @@ class VoicePanel(QWidget):
 
     audio_uploaded = Signal(str)  # 上传成功后发射音频名
 
-    def __init__(self, client: BaseTTSClient | None = None):
+    def __init__(self, project: Project, client: BaseTTSClient | None = None):
         super().__init__()
+        self._project = project
         self._client = client or IndexTTSClient()
         self._audio_path: str = ""
         self._audio_name: str = ""
@@ -200,6 +202,10 @@ class VoicePanel(QWidget):
     def set_client(self, client: BaseTTSClient):
         """外部（如 MainWindow）动态切换 API 客户端。"""
         self._client = client
+
+    def set_project(self, project: Project):
+        """切换工程时更新引用（默认音频保留在项目根目录）。"""
+        self._project = project
 
     def get_audio_name(self) -> str:
         return self._audio_name
