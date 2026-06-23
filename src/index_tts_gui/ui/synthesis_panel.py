@@ -1,4 +1,6 @@
 """合成控制面板"""
+import glob
+import logging
 import os
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
@@ -8,8 +10,21 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 
 from index_tts_gui.core.tts_client import BaseTTSClient, IndexTTSClient
+from index_tts_gui.core.merger import (
+    collect_sentence_wavs,
+    merge_wavs_with_pauses,
+    merge_wavs_with_custom_pauses,
+    validate_wav_order,
+)
+from index_tts_gui.core.pause_advisor import (
+    LLMPauseAdvisor,
+    is_configured as llm_is_configured,
+)
 from index_tts_gui.ui.synthesis_worker import SynthesisWorker
 from index_tts_gui.ui.voice_panel import VoicePanel
+
+
+logger = logging.getLogger("index_tts")
 
 
 class SynthesisPanel(QWidget):
@@ -25,11 +40,13 @@ class SynthesisPanel(QWidget):
         self._audio_name: str = ""
         self._output_dir: str = "output_tts"
         self._was_canceled = False
+        self._llm_cfg: dict = {}
 
         self._voice_panel = VoicePanel(self._client)
         self._voice_panel.audio_uploaded.connect(self.set_audio_name)
 
         self._setup_ui()
+        self._refresh_merge_button()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -94,6 +111,33 @@ class SynthesisPanel(QWidget):
         """)
         self._btn_stop.clicked.connect(self._stop)
         ctrl.addWidget(self._btn_stop)
+
+        self._btn_merge = QPushButton("🔀 合并完整音频")
+        self._btn_merge.setEnabled(False)
+        self._btn_merge.setStyleSheet("""
+            QPushButton {
+                background: #ff9800; color: white;
+                padding: 10px 24px; border-radius: 6px;
+                font-size: 14px; font-weight: bold;
+            }
+            QPushButton:hover { background: #f57c00; }
+            QPushButton:disabled { background: #ccc; }
+        """)
+        self._btn_merge.clicked.connect(self._merge_full_audio)
+        ctrl.addWidget(self._btn_merge)
+
+        self._btn_clear_output = QPushButton("🗑 清空输出")
+        self._btn_clear_output.setStyleSheet("""
+            QPushButton {
+                background: #757575; color: white;
+                padding: 10px 24px; border-radius: 6px;
+                font-size: 14px; font-weight: bold;
+            }
+            QPushButton:hover { background: #616161; }
+        """)
+        self._btn_clear_output.clicked.connect(self._clear_output_dir)
+        ctrl.addWidget(self._btn_clear_output)
+
         ctrl.addStretch()
         layout.addLayout(ctrl)
 
@@ -111,9 +155,20 @@ class SynthesisPanel(QWidget):
     def set_sentences(self, sentences: list[str]):
         self._sentences = sentences
         self._progress.setMaximum(len(sentences))
+        self._refresh_merge_button()
 
     def set_audio_name(self, name: str):
         self._audio_name = name
+
+    def set_llm_config(self, cfg: dict):
+        """外部注入 LLM 配置，用于智能停顿建议。"""
+        self._llm_cfg = cfg or {}
+
+    def _refresh_merge_button(self):
+        """当输出目录存在 sentence_*.wav 时启用合并按钮。"""
+        has_wavs = bool(collect_sentence_wavs(self._output_dir))
+        has_sentences = bool(self._sentences)
+        self._btn_merge.setEnabled(has_wavs and has_sentences)
 
     def _choose_dir(self):
         path = QFileDialog.getExistingDirectory(self, "选择输出目录")
@@ -133,6 +188,7 @@ class SynthesisPanel(QWidget):
         self._progress.setValue(0)
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
+        self._btn_merge.setEnabled(False)
         self._log.clear()
 
         self._worker = SynthesisWorker(
@@ -171,10 +227,92 @@ class SynthesisPanel(QWidget):
         self._progress.setValue(self._progress.maximum())
         self._status_label.setText("合成完成 ✓")
         self._log_msg("━━━━━━━━━━ 完成 ━━━━━━━━━━")
+        self._btn_merge.setEnabled(True)
         self.synthesis_done.emit(self._output_dir)
 
     def _log_msg(self, msg: str):
         self._log.appendPlainText(msg)
+
+    def _clear_output_dir(self):
+        """清空输出目录下的生成文件。"""
+        if not os.path.exists(self._output_dir):
+            self._log_msg("输出目录不存在，无需清空")
+            return
+
+        patterns = ["sentence_*.wav", "full_dub.wav", "split_result.txt"]
+        removed = 0
+        for pattern in patterns:
+            for path in glob.glob(os.path.join(self._output_dir, pattern)):
+                try:
+                    os.remove(path)
+                    removed += 1
+                except Exception as e:
+                    self._log_msg(f"✗ 删除失败 {path}: {e}")
+
+        self._log_msg(f"🗑 已清空输出目录，删除 {removed} 个文件")
+        self._refresh_merge_button()
+
+    def _merge_full_audio(self):
+        """把 output_dir 里的片段合并成完整音频，优先使用 LLM 停顿建议。"""
+        if not self._sentences:
+            self._log_msg("⚠ 没有句子，无法合并")
+            return
+
+        logger.info("开始合并: output_dir=%s sentences=%d", self._output_dir, len(self._sentences))
+
+        wavs = collect_sentence_wavs(self._output_dir)
+        logger.info("发现音频片段: %d 个", len(wavs))
+        if not wavs:
+            self._log_msg(f"⚠ 在 {self._output_dir} 下未找到 sentence_*.wav")
+            return
+
+        if len(wavs) != len(self._sentences):
+            self._log_msg(
+                f"⚠ 音频片段数（{len(wavs)}）与句子数（{len(self._sentences)}）不一致"
+            )
+            return
+
+        # 校验文件名中的文本与当前句子是否一致
+        errors = validate_wav_order(wavs, self._sentences)
+        if errors:
+            self._log_msg("⚠ 音频文件与当前句子不匹配：")
+            for err in errors:
+                self._log_msg(f"  - {err}")
+            self._log_msg("请重新合成，或检查 output_tts 目录")
+            return
+
+        output_path = os.path.join(self._output_dir, "full_dub.wav")
+
+        # 优先调用 LLM 停顿顾问
+        pauses = None
+        if llm_is_configured(self._llm_cfg):
+            self._log_msg("🤖 正在询问 LLM 停顿建议…")
+            try:
+                advisor = LLMPauseAdvisor(
+                    api_url=self._llm_cfg["api_url"],
+                    api_key=self._llm_cfg["api_key"],
+                    model=self._llm_cfg["model"],
+                    timeout=self._llm_cfg.get("timeout", 60),
+                    prompt_template=self._llm_cfg.get(
+                        "pause_prompt_template", ""
+                    ) or None,
+                )
+                pauses = advisor.advise(self._sentences)
+                self._log_msg(f"📐 LLM 停顿建议: {pauses}")
+            except Exception as e:
+                logger.exception("LLM 停顿顾问失败")
+                self._log_msg(f"⚠ LLM 停顿建议失败，回退标点规则: {e}")
+
+        try:
+            if pauses:
+                merge_wavs_with_custom_pauses(wavs, pauses, output_path)
+            else:
+                merge_wavs_with_pauses(wavs, self._sentences, output_path)
+            self._log_msg(f"✓ 已生成完整音频: {output_path}")
+            self._status_label.setText(f"完整音频已生成: {output_path}")
+        except Exception as e:
+            logger.exception("合并完整音频失败")
+            self._log_msg(f"✗ 合并失败: {e}")
 
     def set_client(self, client: BaseTTSClient):
         """外部（如 MainWindow）动态切换 API 客户端。"""

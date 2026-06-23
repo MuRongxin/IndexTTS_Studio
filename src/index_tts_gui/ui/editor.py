@@ -1,4 +1,5 @@
 """文稿编辑面板"""
+import os
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QPlainTextEdit,
     QPushButton, QLabel, QFileDialog, QMessageBox,
@@ -13,6 +14,26 @@ from index_tts_gui.ui.split_worker import SplitWorker
 
 
 PUNCT = '。！？，、；：'
+SPLIT_RESULT_FILE = "split_result.txt"
+
+
+def save_split_result(sentences: list[str], path: str = SPLIT_RESULT_FILE):
+    """保存拆分结果到文本文件，一句一行。"""
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            for s in sentences:
+                f.write(s + "\n")
+    except Exception:
+        pass
+
+
+def clear_split_result(path: str = SPLIT_RESULT_FILE):
+    """删除拆分结果文件（静默）。"""
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
 
 
 class SentenceLineEdit(QLineEdit):
@@ -288,6 +309,7 @@ class ManuscriptPanel(QWidget):
         if not item:
             return
         self._sentences[row] = item.text()
+        save_split_result(self._sentences)
         self._update_stats()
         self._emit_timer.stop()
         self._emit_timer.start(300)
@@ -313,6 +335,20 @@ class ManuscriptPanel(QWidget):
         self._sentences = list(sentences)
         self._update_stats()
         self._table.viewport().update()
+
+    def load_split_result(self, path: str = SPLIT_RESULT_FILE):
+        """启动时从文件加载上次的拆分结果。"""
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                sentences = [line.strip() for line in f if line.strip()]
+            if sentences:
+                self._load_table(sentences)
+                self.sentences_ready.emit(self._sentences)
+                self._status_label.setText(f"已加载 {len(sentences)} 句拆分结果")
+        except Exception as e:
+            self._status_label.setText(f"加载拆分结果失败: {e}")
 
     def _update_stats(self):
         text = self._editor.toPlainText()
@@ -381,6 +417,7 @@ class ManuscriptPanel(QWidget):
         self._btn_split.setEnabled(True)
         self._load_table(sentences)
         self._status_label.setText(msg)
+        save_split_result(sentences)
         self.sentences_ready.emit(self._sentences)
 
     def _split_at_cursor(self, cursor_pos: int):
@@ -407,6 +444,7 @@ class ManuscriptPanel(QWidget):
         # 先关闭当前编辑器，避免旧编辑器与重新加载后的行错位
         self._table.setCurrentIndex(self._table.model().index(-1, -1))
         self._load_table(new_sentences)
+        save_split_result(self._sentences)
 
         # 让新行进入编辑状态
         self._table.setCurrentCell(row + 1, 1)
@@ -440,6 +478,7 @@ class ManuscriptPanel(QWidget):
         # 先关闭当前编辑器，避免旧编辑器与重新加载后的行错位
         self._table.setCurrentIndex(self._table.model().index(-1, -1))
         self._load_table(new_sentences)
+        save_split_result(self._sentences)
 
         # 定位到合并后的行
         self._table.setCurrentCell(row - 1, 1)

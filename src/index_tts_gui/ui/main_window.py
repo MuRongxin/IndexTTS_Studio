@@ -36,6 +36,8 @@ class MainWindow(QMainWindow):
         self._client: BaseTTSClient | None = None
         self._load_config()
         self._setup_central()
+        # 启动时尝试加载上次保存的拆分结果
+        self.manuscript_panel.load_split_result()
         self._setup_statusbar()
         self._apply_stylesheet()
         self._apply_api()
@@ -142,8 +144,11 @@ class MainWindow(QMainWindow):
             self.synthesis_panel.set_client(self._client)
 
     def _apply_llm_config(self):
+        llm_cfg = self._config.get("llm", {})
         if hasattr(self, "manuscript_panel"):
-            self.manuscript_panel.set_llm_config(self._config.get("llm", {}))
+            self.manuscript_panel.set_llm_config(llm_cfg)
+        if hasattr(self, "synthesis_panel"):
+            self.synthesis_panel.set_llm_config(llm_cfg)
 
     # ── UI ──
 

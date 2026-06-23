@@ -66,10 +66,18 @@ class LLMClient:
             logger.error("LLM 未配置 API Key")
             raise LLMError("未配置 API Key")
 
+        # 记录请求摘要，便于复现和定位
+        total_chars = sum(len(m.get("content", "")) for m in messages)
         logger.info(
-            "调用 LLM: base_url=%s model=%s max_completion_tokens=%s",
+            "调用 LLM: base_url=%s model=%s max_completion_tokens=%s "
+            "messages=%d total_chars=%d temperature=%s",
             self.base_url, self.model, max_completion_tokens,
+            len(messages), total_chars, temperature,
         )
+        for i, m in enumerate(messages):
+            role = m.get("role", "unknown")
+            content_preview = m.get("content", "")[:200].replace("\n", " ")
+            logger.debug("LLM message[%d] role=%s: %s", i, role, content_preview)
 
         try:
             completion = self._get_client().chat.completions.create(
@@ -99,17 +107,21 @@ class LLMClient:
         # 记录响应元数据，便于排查空返回
         choice = completion.choices[0]
         finish_reason = getattr(choice, "finish_reason", None)
-        logger.debug(
-            "LLM 响应: model=%s finish_reason=%s choices=%d",
-            getattr(completion, "model", None),
-            finish_reason,
-            len(completion.choices),
-        )
-
         content = choice.message.content
         if content is None:
             content = ""
-        return content.strip()
+        content = content.strip()
+
+        logger.info(
+            "LLM 响应: model=%s finish_reason=%s choices=%d content_len=%d",
+            getattr(completion, "model", None),
+            finish_reason,
+            len(completion.choices),
+            len(content),
+        )
+        logger.debug("LLM 响应内容: %s", content[:1000])
+
+        return content
 
     def test_connection(self) -> str:
         """

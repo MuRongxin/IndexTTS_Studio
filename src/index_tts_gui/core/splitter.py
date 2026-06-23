@@ -201,11 +201,12 @@ class LLMSplitter(BaseSplitter):
         self.user_prompt_template = user_prompt_template
 
     def split(self, text: str) -> list[str]:
-        if not text.strip():
+        stripped = text.strip()
+        if not stripped:
             return []
 
         user_prompt = self.user_prompt_template.format(
-            text=text.strip(),
+            text=stripped,
             max_length=self.max_length,
         )
         messages: list[dict[str, str]] = [
@@ -216,23 +217,46 @@ class LLMSplitter(BaseSplitter):
                 0, {"role": "system", "content": self.system_prompt}
             )
 
+        # MiMo 等思考模型会把部分 token 用于推理，长文本时需要更多输出配额
+        # 按文本长度动态调整，确保有充足 token 用于生成结果
+        dynamic_max_tokens = max(
+            self.max_completion_tokens,
+            min(8192, int(len(stripped) * 2.5) + 1024),
+        )
+
+        logger.info(
+            "LLM 拆分: text_len=%d max_length=%d max_completion_tokens=%d",
+            len(stripped), self.max_length, dynamic_max_tokens,
+        )
+
         last_content = ""
         for attempt in range(2):
             content = self._client.chat_completion(
                 messages=messages,
-                max_completion_tokens=self.max_completion_tokens,
+                max_completion_tokens=dynamic_max_tokens,
                 temperature=0.3,
             )
             last_content = content
-            logger.debug("LLM 原始响应 (attempt %d):\n%s", attempt + 1, content)
+            logger.info(
+                "LLM 拆分尝试 %d: content_len=%d",
+                attempt + 1, len(content),
+            )
+            logger.debug("LLM 拆分原始响应 (attempt %d):\n%s", attempt + 1, content)
 
             sentences = self._parse_output(content)
+            logger.info(
+                "LLM 拆分解析: 原始行数=%d 解析后句子数=%d",
+                len(content.splitlines()), len(sentences),
+            )
             if sentences:
                 return sentences
 
-            logger.warning("LLM 返回为空或无法解析，尝试重试: %s", content[:200])
+            logger.warning(
+                "LLM 拆分尝试 %d 返回为空或无法解析: %s",
+                attempt + 1, content[:300]
+            )
 
-        logger.error("LLM 两次返回均为空或无法解析")
+        logger.error("LLM 两次拆分均失败，最后响应: %s", last_content[:500])
         raise LLMError("LLM 返回为空，请检查 Prompt 模板或模型响应")
 
     def _parse_output(self, content: str) -> list[str]:

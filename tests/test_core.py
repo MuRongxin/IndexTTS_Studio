@@ -111,8 +111,12 @@ def test_tts_client():
 
 
 def test_merger_duration():
+    import os
+    import pytest
     from index_tts_gui.core.merger import get_wav_duration
     wav = "output_tts/sentence_01.wav"
+    if not os.path.exists(wav):
+        pytest.skip(f"测试音频不存在: {wav}")
     dur = get_wav_duration(wav)
     assert dur > 0, f"Invalid duration: {dur}"
     print(f"✓ merger (duration: {dur:.2f}s)")

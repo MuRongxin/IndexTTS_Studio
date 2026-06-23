@@ -21,6 +21,11 @@ class BaseTTSClient(ABC):
     """TTS 服务客户端抽象基类。"""
 
     @abstractmethod
+    def health_check(self) -> str:
+        """检查服务是否可达，返回状态文本。"""
+        ...
+
+    @abstractmethod
     def check_audio(self, file_name: str) -> bool:
         """检查参考音频是否已上传/可用。"""
         ...
@@ -48,6 +53,24 @@ class IndexTTSClient(BaseTTSClient):
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout = {**DEFAULT_TIMEOUT, **(timeout or {})}
+
+    def health_check(self) -> str:
+        """检查 IndexTTS 服务是否可达。"""
+        try:
+            resp = requests.get(
+                f"{self.base_url}/v1/check/audio",
+                timeout=self.timeout["check"],
+            )
+            # 只要服务有响应（即使是 400/404），说明它在线
+            if resp.status_code < 500:
+                return f"TTS 服务可连接（HTTP {resp.status_code}）"
+            return f"TTS 服务异常（HTTP {resp.status_code}）"
+        except requests.exceptions.ConnectionError as e:
+            raise RuntimeError(f"无法连接到 TTS 服务: {e}") from e
+        except requests.exceptions.Timeout as e:
+            raise RuntimeError(f"连接 TTS 服务超时") from e
+        except Exception as e:
+            raise RuntimeError(f"检测失败: {e}") from e
 
     def check_audio(self, file_name: str) -> bool:
         resp = requests.get(

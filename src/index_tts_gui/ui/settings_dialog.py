@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt
 from index_tts_gui.core.tts_client import (
     DEFAULT_API_URL,
     DEFAULT_TIMEOUT,
+    create_client,
     list_providers,
 )
 from index_tts_gui.core.splitter import (
@@ -75,6 +76,26 @@ class SettingsDialog(QDialog):
             timeout_layout.addLayout(col)
         timeout_layout.addStretch()
         form.addRow("超时:", timeout_layout)
+
+        # TTS API 连接测试
+        self._tts_test_result = QLabel("")
+        self._tts_test_result.setStyleSheet("color: #666; font-size: 12px;")
+        self._tts_test_result.setWordWrap(True)
+
+        btn_test_tts = QPushButton("🧪 测试 TTS API 连接")
+        btn_test_tts.setStyleSheet("""
+            QPushButton {
+                background: #4caf50; color: white;
+                padding: 6px 14px; border-radius: 4px;
+            }
+            QPushButton:hover { background: #388e3c; }
+        """)
+        btn_test_tts.clicked.connect(self._test_tts_connection)
+
+        tts_test_layout = QHBoxLayout()
+        tts_test_layout.addWidget(btn_test_tts)
+        tts_test_layout.addWidget(self._tts_test_result, 1)
+        form.addRow("检测:", tts_test_layout)
 
         layout.addLayout(form)
 
@@ -223,6 +244,37 @@ class SettingsDialog(QDialog):
         self._llm_max_completion_tokens.setValue(2048)
         self._llm_max_len.setValue(DEFAULT_MAX_LENGTH)
         self._llm_prompt.setPlainText(DEFAULT_LLM_PROMPT)
+
+    def _test_tts_connection(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        url = self._api_input.text().strip()
+        provider = self._provider_combo.currentText().strip()
+        timeout = {
+            name: spin.value()
+            for name, spin in self._timeout_spin.items()
+        }
+
+        if not url:
+            self._tts_test_result.setText("❌ 请先填写 API URL")
+            self._tts_test_result.setStyleSheet("color: #d32f2f;")
+            return
+
+        self._tts_test_result.setText("正在检测…")
+        self._tts_test_result.setStyleSheet("color: #f57c00;")
+
+        try:
+            client = create_client(
+                provider=provider,
+                api_url=url,
+                timeout=timeout,
+            )
+            msg = client.health_check()
+            self._tts_test_result.setText(f"✅ {msg}")
+            self._tts_test_result.setStyleSheet("color: #4caf50;")
+        except Exception as e:
+            self._tts_test_result.setText(f"❌ {e}")
+            self._tts_test_result.setStyleSheet("color: #d32f2f;")
 
     def _test_llm_connection(self):
         from PySide6.QtWidgets import QMessageBox
