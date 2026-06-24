@@ -38,6 +38,7 @@ class Project:
         sentences: list[str] | None = None,
         audio_name: str = "",
         pauses: list[float] | None = None,
+        audio_list: list[dict] | None = None,
         created_at: str | None = None,
         updated_at: str | None = None,
     ):
@@ -47,6 +48,7 @@ class Project:
         self.sentences = list(sentences) if sentences else []
         self.audio_name = audio_name
         self.pauses = list(pauses) if pauses else []
+        self.audio_list: list[dict] = list(audio_list) if audio_list else []
         self.created_at = created_at or datetime.now().isoformat()
         self.updated_at = updated_at or datetime.now().isoformat()
 
@@ -76,6 +78,7 @@ class Project:
             "source_text": self.source_text,
             "sentences": self.sentences,
             "audio_name": self.audio_name,
+            "audio_list": self.audio_list,
             "pauses": self.pauses,
         }
         try:
@@ -100,6 +103,7 @@ class Project:
                 source_text=data.get("source_text", ""),
                 sentences=data.get("sentences", []),
                 audio_name=data.get("audio_name", ""),
+                audio_list=data.get("audio_list", []),
                 pauses=data.get("pauses", []),
                 created_at=data.get("created_at"),
                 updated_at=data.get("updated_at"),

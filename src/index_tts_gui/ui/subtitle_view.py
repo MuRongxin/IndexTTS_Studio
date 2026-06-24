@@ -65,6 +65,8 @@ class SubtitlePanel(QWidget):
         self._get_manuscript_text: Optional[Callable[[], str]] = None
         self._block_signals = False
         self._current_edit_index = -1
+        self._undo_stack: list[list[SubtitleEntry]] = []
+        self._undo_max = 50
 
         # 音频
         self._player = QMediaPlayer()
@@ -242,6 +244,11 @@ class SubtitlePanel(QWidget):
         self._btn_delete.setEnabled(False)
         btn_row.addWidget(self._btn_delete)
 
+        self._btn_strip_punct = QPushButton("去句尾标点")
+        self._btn_strip_punct.setToolTip("去除全部字幕句尾的。！？，、；：等标点")
+        self._btn_strip_punct.clicked.connect(self._strip_all_punctuation)
+        btn_row.addWidget(self._btn_strip_punct)
+
         btn_row.addStretch()
 
         self._btn_regenerate = QPushButton("🔄 重新生成")
@@ -315,6 +322,11 @@ class SubtitlePanel(QWidget):
             QKeySequence(" "), self, self._toggle_play
         )
         self._shortcut_play.setContext(Qt.ApplicationShortcut)
+
+        self._shortcut_undo = QShortcut(
+            QKeySequence("Ctrl+Z"), self, self._undo
+        )
+        self._shortcut_undo.setContext(Qt.ApplicationShortcut)
 
         # 时间轴
         self._timeline.playhead_moved.connect(self._on_timeline_playhead_moved)
@@ -475,6 +487,7 @@ class SubtitlePanel(QWidget):
             self._block_signals = False
 
     def _on_timeline_subtitle_moved(self, index: int, start: float, end: float):
+        self._push_undo()
         item = self._track.get_item(index)
         if item is None:
             return
@@ -488,6 +501,7 @@ class SubtitlePanel(QWidget):
 
     def _on_timeline_double_click(self, time: float):
         """双击空白处：在当前时间添加一条空字幕"""
+        self._push_undo()
         end_time = min(time + 2.0, self._timeline.duration)
         new_item = SubtitleItem(0, time, end_time, "")
         self._track.add_item(new_item)
@@ -496,6 +510,7 @@ class SubtitlePanel(QWidget):
         self.select_row(new_item.index)
 
     def _on_timeline_subtitle_deleted(self, indices: list[int]):
+        self._push_undo()
         for idx in sorted(indices, reverse=True):
             try:
                 self._track.remove_item(idx)
@@ -507,6 +522,7 @@ class SubtitlePanel(QWidget):
 
     def _on_razor_split(self, index: int, split_time: float):
         """剃刀工具：在时间轴点击位置切分字幕块。"""
+        self._push_undo()
         item = self._track.get_item(index)
         if item is None:
             return
@@ -527,6 +543,7 @@ class SubtitlePanel(QWidget):
     def set_project(self, project: Project):
         self._project = project
         self._track = SubtitleTrack()
+        self._undo_stack.clear()
         self._current_edit_index = -1
         self._text_edit.clear()
         self._timeline.set_subtitle_track(self._track)
@@ -566,6 +583,7 @@ class SubtitlePanel(QWidget):
     def load_entries(self, entries: List[SubtitleEntry]):
         """载入字幕条目（与合成流水线兼容），并刷新 full_dub.wav 音频。"""
         self._track = SubtitleTrack.from_entries(entries)
+        self._undo_stack.clear()
         self._timeline.set_subtitle_track(self._track)
 
         # 合并完成后 full_dub.wav 可能被覆盖，强制重新加载以同步波形和播放器
@@ -634,6 +652,9 @@ class SubtitlePanel(QWidget):
         if target_row < 0:
             return
 
+        # 如果之前的字幕文本被编辑过，保存撤销点
+        self._maybe_push_text_undo()
+
         self._block_signals = True
         try:
             self._table.selectRow(target_row)
@@ -665,11 +686,13 @@ class SubtitlePanel(QWidget):
                 continue
 
         if not indices:
+            self._maybe_push_text_undo()
             self._current_edit_index = -1
             self._timeline.clear_selection()
             self._update_button_states()
             return
 
+        self._maybe_push_text_undo()
         self._current_edit_index = max(indices)
         item = self._track.get_item(self._current_edit_index)
         if item is not None:
@@ -743,7 +766,86 @@ class SubtitlePanel(QWidget):
         finally:
             self._block_signals = False
 
+    # ── 撤销 ──
+
+    def _push_undo(self):
+        """保存当前字幕状态到撤销栈。"""
+        snapshot = self._track.to_entries()
+        self._undo_stack.append(snapshot)
+        if len(self._undo_stack) > self._undo_max:
+            self._undo_stack.pop(0)
+
+    def _undo(self):
+        """撤销到上一个状态。"""
+        if not self._undo_stack:
+            return
+        snapshot = self._undo_stack.pop()
+        self._track = SubtitleTrack.from_entries(snapshot)
+        self._current_edit_index = -1
+        self._text_edit.clear()
+        self.refresh_table()
+        self._timeline.set_subtitle_track(self._track)
+        self._update_info_label()
+        self._update_button_states()
+
+    def _maybe_push_text_undo(self):
+        """如果当前编辑的字幕文本已变更，保存撤销点。"""
+        if self._current_edit_index < 0:
+            return
+        item = self._track.get_item(self._current_edit_index)
+        if item is None:
+            return
+        editor_text = self._text_edit.toPlainText()
+        if editor_text != item.text:
+            self._push_undo()
+
     # ── 文本编辑 ──
+
+    def _strip_trailing_punctuation(self):
+        """去除当前字幕句末标点符号。"""
+        self._push_undo()
+        if self._current_edit_index < 0:
+            return
+        item = self._track.get_item(self._current_edit_index)
+        if item is None:
+            return
+        PUNCT = '。！？，、；：.!,?;:'
+        text = item.text.rstrip()
+        if text and text[-1] in PUNCT:
+            text = text.rstrip(PUNCT).rstrip()
+        item.text = text
+        self._block_signals = True
+        try:
+            self._text_edit.setPlainText(text)
+        finally:
+            self._block_signals = False
+        self._update_info_label()
+        self._timeline.update()
+
+    def _strip_all_punctuation(self):
+        """去除全部字幕句末标点符号。"""
+        self._push_undo()
+        PUNCT = '。！？，、；：.!,?;:'
+        changed = 0
+        for i in range(self._track.count):
+            item = self._track.get_item(i)
+            if item is None:
+                continue
+            text = item.text.rstrip()
+            if text and text[-1] in PUNCT:
+                item.text = text.rstrip(PUNCT).rstrip()
+                changed += 1
+        self.refresh_table()
+        self._timeline.set_subtitle_track(self._track)
+        if self._current_edit_index >= 0:
+            item = self._track.get_item(self._current_edit_index)
+            if item:
+                self._block_signals = True
+                try:
+                    self._text_edit.setPlainText(item.text)
+                finally:
+                    self._block_signals = False
+        self._update_info_label()
 
     def _on_text_changed(self):
         if self._block_signals or self._current_edit_index < 0:
@@ -879,6 +981,7 @@ class SubtitlePanel(QWidget):
     # ── 切分/合并/删除 ──
 
     def _split_selected(self):
+        self._push_undo()
         if self._current_edit_index < 0:
             return
         item = self._track.get_item(self._current_edit_index)
@@ -896,6 +999,7 @@ class SubtitlePanel(QWidget):
 
     def _merge_selected(self):
         """合并选中的多个字幕块（表格或时间轴选择均可）。"""
+        self._push_undo()
         # 合并表格和时间轴的选择
         indices = set()
         for row in set(item.row() for item in self._table.selectedItems()):
@@ -920,6 +1024,7 @@ class SubtitlePanel(QWidget):
         self.select_row(first)
 
     def _delete_selected(self):
+        self._push_undo()
         indices = set()
         for row in set(item.row() for item in self._table.selectedItems()):
             idx_item = self._table.item(row, 0)

@@ -3,6 +3,7 @@ import os
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QFileDialog, QFrame, QMessageBox,
+    QListWidget, QListWidgetItem, QAbstractItemView,
 )
 from PySide6.QtCore import Qt, Signal, QUrl
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
@@ -40,13 +41,24 @@ class VoicePanel(QWidget):
             self._load_audio(default)
 
     def _restore_from_project(self):
-        """从工程恢复已记录的音频名，尝试在常见位置找到文件并加载。"""
-        if not self._project or not self._project.audio_name:
+        """从工程恢复已记录的音频列表和当前选择。"""
+        if not self._project:
+            return
+
+        # 刷新列表 UI
+        self._refresh_audio_list_ui()
+
+        if not self._project.audio_name:
             return
         stored_name = self._project.audio_name
         # 如果已加载的就是工程记录的音频，不需要恢复
         if self._audio_name == stored_name and self._audio_path:
             return
+        # 优先从 audio_list 中找匹配路径
+        for entry in self._project.audio_list:
+            if entry.get("name") == stored_name and os.path.exists(entry.get("path", "")):
+                self._load_audio_from_list(entry["path"])
+                return
         # 尝试在常见位置查找
         candidates = [
             os.path.join(os.getcwd(), stored_name),
@@ -92,6 +104,49 @@ class VoicePanel(QWidget):
         drop_layout.addWidget(self._drop_label)
 
         layout.addWidget(self._drop_frame)
+
+        # 参考音频列表
+        list_label = QLabel("📋 参考音频列表:")
+        list_label.setStyleSheet("font-weight: bold; margin-top: 8px;")
+        layout.addWidget(list_label)
+
+        self._audio_list_widget = QListWidget()
+        self._audio_list_widget.setMaximumHeight(120)
+        self._audio_list_widget.setAlternatingRowColors(True)
+        self._audio_list_widget.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._audio_list_widget.currentRowChanged.connect(self._on_audio_list_selected)
+        self._audio_list_widget.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                font-size: 13px;
+            }
+            QListWidget::item {
+                padding: 4px 8px;
+            }
+            QListWidget::item:selected {
+                background: #2979ff;
+                color: white;
+            }
+        """)
+        layout.addWidget(self._audio_list_widget)
+
+        # 列表操作按钮
+        list_btn_row = QHBoxLayout()
+        self._btn_remove_audio = QPushButton("🗑 移除选中")
+        self._btn_remove_audio.setToolTip("从列表中移除选中的参考音频")
+        self._btn_remove_audio.clicked.connect(self._remove_selected_audio)
+        self._btn_remove_audio.setStyleSheet("""
+            QPushButton {
+                background: #757575; color: white;
+                padding: 2px 10px; border-radius: 3px;
+                font-size: 12px;
+            }
+            QPushButton:hover { background: #d32f2f; }
+        """)
+        list_btn_row.addWidget(self._btn_remove_audio)
+        list_btn_row.addStretch()
+        layout.addLayout(list_btn_row)
 
         # 已选文件信息
         info_layout = QHBoxLayout()
@@ -175,6 +230,108 @@ class VoicePanel(QWidget):
         # 加载到播放器
         self._player.setSource(QUrl.fromLocalFile(path))
 
+        # 加入列表（去重）
+        self._add_to_audio_list(path, self._audio_name)
+
+    # ── 参考音频列表管理 ──
+
+    def _add_to_audio_list(self, path: str, name: str):
+        """将音频加入列表（去重），同步到工程。"""
+        # 去重：检查路径
+        for entry in self._project.audio_list:
+            if entry.get("path") == path:
+                # 已存在，选中它
+                for i in range(self._audio_list_widget.count()):
+                    if self._audio_list_widget.item(i).data(Qt.UserRole) == path:
+                        self._audio_list_widget.setCurrentRow(i)
+                        return
+        # 添加新条目
+        self._project.audio_list.append({"path": path, "name": name})
+        self._project.save()
+
+        item = QListWidgetItem(f"🎵 {name}")
+        item.setData(Qt.UserRole, path)
+        item.setToolTip(path)
+        self._audio_list_widget.addItem(item)
+        self._audio_list_widget.setCurrentRow(self._audio_list_widget.count() - 1)
+
+    def _on_audio_list_selected(self, row: int):
+        """列表项被选中时切换音频。"""
+        if row < 0:
+            return
+        item = self._audio_list_widget.item(row)
+        path = item.data(Qt.UserRole)
+        if path and path != self._audio_path:
+            self._load_audio_from_list(path)
+
+    def _load_audio_from_list(self, path: str):
+        """从列表加载音频（不重复加入列表）。"""
+        if not os.path.exists(path):
+            # 文件不存在，从列表和工程中移除
+            self._remove_audio_path(path)
+            return
+        self._audio_path = path
+        self._audio_name = os.path.basename(path)
+        self._file_label.setText(f"📁 {self._audio_name}")
+        self._btn_play.setEnabled(True)
+        self._btn_upload.setEnabled(True)
+        self._upload_status.setText("")
+        self._player.setSource(QUrl.fromLocalFile(path))
+        # 同步到工程
+        self._project.audio_name = self._audio_name
+        self._project.save()
+
+    def _remove_selected_audio(self):
+        """移除列表中选中的音频。"""
+        row = self._audio_list_widget.currentRow()
+        if row < 0:
+            return
+        item = self._audio_list_widget.item(row)
+        path = item.data(Qt.UserRole)
+        self._remove_audio_path(path)
+
+    def _remove_audio_path(self, path: str):
+        """从列表和工程中移除指定路径的音频。"""
+        # 从工程移除
+        self._project.audio_list = [
+            e for e in self._project.audio_list if e.get("path") != path
+        ]
+        self._project.save()
+        # 从列表控件移除
+        for i in range(self._audio_list_widget.count()):
+            if self._audio_list_widget.item(i).data(Qt.UserRole) == path:
+                self._audio_list_widget.takeItem(i)
+                break
+        # 如果当前正在使用被删除的音频，清除状态
+        if self._audio_path == path:
+            self._audio_path = ""
+            self._audio_name = ""
+            self._file_label.setText("未选择音频")
+            self._btn_play.setEnabled(False)
+            self._btn_upload.setEnabled(False)
+            self._upload_status.setText("")
+            self._player.stop()
+
+    def _refresh_audio_list_ui(self):
+        """从工程数据刷新列表 UI（切换工程时调用）。"""
+        self._audio_list_widget.blockSignals(True)
+        self._audio_list_widget.clear()
+        for entry in self._project.audio_list:
+            path = entry.get("path", "")
+            name = entry.get("name", os.path.basename(path))
+            if not os.path.exists(path):
+                continue
+            item = QListWidgetItem(f"🎵 {name}")
+            item.setData(Qt.UserRole, path)
+            item.setToolTip(path)
+            self._audio_list_widget.addItem(item)
+            # 选中当前使用的音频
+            if path == self._audio_path:
+                self._audio_list_widget.setCurrentItem(item)
+        self._audio_list_widget.blockSignals(False)
+
+    # ── 播放控制 ──
+
     def _toggle_play(self):
         if self._player.playbackState() == QMediaPlayer.PlayingState:
             self._player.pause()
@@ -242,6 +399,7 @@ class VoicePanel(QWidget):
         self._upload_status.setText("")
         self._player.stop()
         self._player.setSource(QUrl())
+        self._audio_list_widget.clear()
 
     def get_audio_name(self) -> str:
         return self._audio_name
