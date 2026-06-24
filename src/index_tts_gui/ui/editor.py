@@ -13,6 +13,7 @@ from PySide6.QtGui import QKeyEvent
 from index_tts_gui.ui.split_worker import SplitWorker
 from index_tts_gui.core.project import Project
 from index_tts_gui.ui.theme import Theme
+from index_tts_gui.ui.widgets import Card
 
 
 PUNCT = '。！？，、；：'
@@ -94,29 +95,6 @@ class ManuscriptPanel(QWidget):
         self._editing_row: int = -1
         self._setup_ui()
         self._load_from_project()
-
-    def _card(self, title: str = "") -> QFrame:
-        """创建一个现代卡片容器。"""
-        card = QFrame()
-        c = Theme.colors
-        r = Theme.radius
-        card.setStyleSheet(f"""
-            QFrame {{
-                background: {c.surface};
-                border: 1px solid {c.border};
-                border-radius: {r.md}px;
-            }}
-        """)
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-        if title:
-            lbl = QLabel(title)
-            lbl.setStyleSheet(
-                f"font-size: {Theme.fonts.size_lg}px; font-weight: 700; color: {c.text_primary};"
-            )
-            layout.addWidget(lbl)
-        return card
 
     def _setup_ui(self):
         c = Theme.colors
@@ -224,7 +202,7 @@ class ManuscriptPanel(QWidget):
         splitter.setStyleSheet(f"background: {c.bg};")
 
         # 左侧：编辑器卡片
-        left_card = self._card("文稿内容")
+        left_card = Card("文稿内容")
         left_layout = left_card.layout()
 
         self._editor = QPlainTextEdit()
@@ -250,7 +228,7 @@ class ManuscriptPanel(QWidget):
         splitter.setStretchFactor(0, 1)
 
         # 右侧：拆分结果卡片
-        right_card = self._card("拆分结果")
+        right_card = Card("拆分结果")
         right_layout = right_card.layout()
 
         hint = QLabel("可直接编辑单元格；Enter 切分、Backspace 合并")

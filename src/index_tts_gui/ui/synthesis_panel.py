@@ -16,6 +16,7 @@ from index_tts_gui.ui.merge_worker import MergeWorker
 from index_tts_gui.ui.synthesis_worker import SynthesisWorker
 from index_tts_gui.ui.voice_panel import VoicePanel
 from index_tts_gui.ui.theme import Theme
+from index_tts_gui.ui.widgets import card
 
 
 logger = logging.getLogger("index_tts")
@@ -48,36 +49,6 @@ class SynthesisPanel(QWidget):
             self.set_sentences(self._project.sentences)
         self._refresh_merge_button()
 
-    def _card(self, title: str = "") -> QGroupBox:
-        """创建一个现代卡片容器。"""
-        card = QGroupBox()
-        c = Theme.colors
-        r = Theme.radius
-        card.setStyleSheet(f"""
-            QGroupBox {{
-                background: {c.surface};
-                border: 1px solid {c.border};
-                border-radius: {r.md}px;
-                margin-top: 0;
-                padding-top: 0;
-            }}
-            QGroupBox::title {{
-                subcontrol-origin: padding;
-                subcontrol-position: top left;
-                left: 0;
-                top: -20px;
-                color: {c.text_secondary};
-                font-size: {Theme.fonts.size_sm}px;
-                font-weight: 600;
-            }}
-        """)
-        if title:
-            card.setTitle(title)
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-        return card
-
     def _setup_ui(self):
         c = Theme.colors
         r = Theme.radius
@@ -89,7 +60,7 @@ class SynthesisPanel(QWidget):
         layout.addWidget(self._voice_panel)
 
         # ── 合成控制卡片 ──
-        ctrl_card = self._card("合成控制")
+        ctrl_card = card("合成控制", use_groupbox=True)
         ctrl_layout = ctrl_card.layout()
 
         # 步骤指示
@@ -171,7 +142,7 @@ class SynthesisPanel(QWidget):
         layout.addWidget(ctrl_card)
 
         # ── 日志卡片 ──
-        log_card = self._card("运行日志")
+        log_card = card("运行日志", use_groupbox=True)
         log_layout = log_card.layout()
 
         self._log = QPlainTextEdit()

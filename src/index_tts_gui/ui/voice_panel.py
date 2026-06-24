@@ -13,6 +13,7 @@ from index_tts_gui.core.tts_client import BaseTTSClient, IndexTTSClient
 from index_tts_gui.core.project import Project
 from index_tts_gui.ui.voice_upload_worker import VoiceUploadWorker
 from index_tts_gui.ui.theme import Theme
+from index_tts_gui.ui.widgets import Card
 
 
 class VoicePanel(QWidget):
@@ -75,29 +76,6 @@ class VoicePanel(QWidget):
         self._file_label.setText(f"{stored_name} (文件缺失)")
         self._btn_upload.setEnabled(True)
 
-    def _card(self, title: str = "") -> QFrame:
-        """创建一个现代卡片容器。"""
-        card = QFrame()
-        c = Theme.colors
-        r = Theme.radius
-        card.setStyleSheet(f"""
-            QFrame {{
-                background: {c.surface};
-                border: 1px solid {c.border};
-                border-radius: {r.md}px;
-            }}
-        """)
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-        if title:
-            lbl = QLabel(title)
-            lbl.setStyleSheet(
-                f"font-size: {Theme.fonts.size_lg}px; font-weight: 700; color: {c.text_primary};"
-            )
-            layout.addWidget(lbl)
-        return card
-
     def _setup_ui(self):
         c = Theme.colors
         r = Theme.radius
@@ -106,7 +84,7 @@ class VoicePanel(QWidget):
         layout.setSpacing(16)
 
         # ── 拖放区卡片 ──
-        drop_card = self._card()
+        drop_card = Card()
         drop_card_layout = drop_card.layout()
 
         self._drop_frame = QFrame()
@@ -179,7 +157,7 @@ class VoicePanel(QWidget):
         layout.addWidget(drop_card)
 
         # ── 参考音频列表卡片 ──
-        list_card = self._card("参考音频列表")
+        list_card = Card("参考音频列表")
         list_card_layout = list_card.layout()
 
         self._audio_list_widget = QListWidget()

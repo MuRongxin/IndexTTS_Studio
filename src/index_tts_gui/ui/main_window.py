@@ -214,9 +214,10 @@ class MainWindow(QMainWindow):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setProperty("nav_index", idx)
+            btn.setProperty("nav_style", "true")
             btn.setCursor(Qt.PointingHandCursor)
             btn.setStyleSheet(f"""
-                QPushButton {{
+                QPushButton[nav_style="true"] {{
                     text-align: left; padding: 10px 14px;
                     border: none; border-radius: {Theme.radius.sm}px;
                     color: {Theme.colors.text_secondary};
@@ -224,13 +225,13 @@ class MainWindow(QMainWindow):
                     font-size: {Theme.fonts.size_md}px;
                     font-weight: 500;
                 }}
-                QPushButton:hover {{
+                QPushButton[nav_style="true"]:hover {{
                     background: {Theme.colors.bg};
                     color: {Theme.colors.text_primary};
                 }}
-                QPushButton:checked {{
-                    background: {Theme.colors.primary_light};
-                    color: {Theme.colors.primary};
+                QPushButton[nav_style="true"]:checked {{
+                    background: {Theme.colors.primary};
+                    color: {Theme.colors.text_on_primary};
                     font-weight: 600;
                 }}
             """)
@@ -270,8 +271,9 @@ class MainWindow(QMainWindow):
         for label, slot in [("新建", self._new_project), ("打开", self._open_project), ("保存", self._save_project)]:
             btn = QPushButton(label)
             btn.setCursor(Qt.PointingHandCursor)
+            btn.setProperty("compact", "true")
             btn.setStyleSheet(f"""
-                QPushButton {{
+                QPushButton[compact="true"] {{
                     background: {Theme.colors.surface};
                     color: {Theme.colors.text_secondary};
                     border: 1px solid {Theme.colors.border};
@@ -279,7 +281,7 @@ class MainWindow(QMainWindow):
                     padding: 4px 8px;
                     font-size: {Theme.fonts.size_sm}px;
                 }}
-                QPushButton:hover {{
+                QPushButton[compact="true"]:hover {{
                     background: {Theme.colors.surface_hover};
                     color: {Theme.colors.text_primary};
                     border-color: {Theme.colors.text_tertiary};
@@ -295,8 +297,9 @@ class MainWindow(QMainWindow):
         # 设置按钮
         btn_settings = QPushButton("设置")
         btn_settings.setCursor(Qt.PointingHandCursor)
+        btn_settings.setProperty("nav_style", "true")
         btn_settings.setStyleSheet(f"""
-            QPushButton {{
+            QPushButton[nav_style="true"] {{
                 text-align: left; padding: 10px 14px;
                 border: 1px solid {Theme.colors.border};
                 border-radius: {Theme.radius.sm}px;
@@ -304,7 +307,7 @@ class MainWindow(QMainWindow):
                 background: {Theme.colors.surface};
                 font-size: {Theme.fonts.size_md}px;
             }}
-            QPushButton:hover {{
+            QPushButton[nav_style="true"]:hover {{
                 background: {Theme.colors.bg};
                 color: {Theme.colors.text_primary};
             }}

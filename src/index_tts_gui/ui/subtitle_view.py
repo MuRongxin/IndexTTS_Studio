@@ -53,6 +53,7 @@ from index_tts_gui.core.io_ass import entries_to_ass
 from index_tts_gui.ui.audio_engine import AudioEngine
 from index_tts_gui.ui.timeline_canvas import TimelineCanvas
 from index_tts_gui.ui.theme import Theme
+from index_tts_gui.ui.widgets import card
 
 
 class SubtitlePanel(QWidget):
@@ -86,36 +87,6 @@ class SubtitlePanel(QWidget):
 
     # ── UI ──
 
-    def _card(self, title: str = "") -> QGroupBox:
-        """创建一个现代卡片容器。"""
-        card = QGroupBox()
-        c = Theme.colors
-        r = Theme.radius
-        card.setStyleSheet(f"""
-            QGroupBox {{
-                background: {c.surface};
-                border: 1px solid {c.border};
-                border-radius: {r.md}px;
-                margin-top: 0;
-                padding-top: 0;
-            }}
-            QGroupBox::title {{
-                subcontrol-origin: padding;
-                subcontrol-position: top left;
-                left: 0;
-                top: -20px;
-                color: {c.text_secondary};
-                font-size: {Theme.fonts.size_sm}px;
-                font-weight: 600;
-            }}
-        """)
-        if title:
-            card.setTitle(title)
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-        return card
-
     def _setup_ui(self):
         c = Theme.colors
         r = Theme.radius
@@ -124,7 +95,7 @@ class SubtitlePanel(QWidget):
         layout.setSpacing(16)
 
         # 顶部音频控制条卡片
-        audio_card = self._card("音频播放")
+        audio_card = card("音频播放", use_groupbox=True)
         audio_layout = audio_card.layout()
         top = QHBoxLayout()
         top.setSpacing(10)
@@ -167,7 +138,7 @@ class SubtitlePanel(QWidget):
         self._splitter.setStyleSheet(f"background: {c.bg};")
 
         # 表格
-        table_card = self._card("字幕列表")
+        table_card = card("字幕列表", use_groupbox=True)
         table_layout = table_card.layout()
         self._table = QTableWidget()
         self._table.setColumnCount(5)
@@ -215,7 +186,7 @@ class SubtitlePanel(QWidget):
         self._splitter.addWidget(table_card)
 
         # 编辑器 + 样式
-        editor_group = self._card("字幕编辑")
+        editor_group = card("字幕编辑", use_groupbox=True)
         editor_layout = editor_group.layout()
 
         self._text_edit = QTextEdit()
