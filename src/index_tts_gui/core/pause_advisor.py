@@ -165,8 +165,4 @@ def is_configured(llm_cfg: dict[str, Any] | None) -> bool:
     """判断 LLM 是否已配置。"""
     if not llm_cfg:
         return False
-    return bool(
-        llm_cfg.get("api_url", "").strip()
-        and llm_cfg.get("api_key", "").strip()
-        and llm_cfg.get("model", "").strip()
-    )
+    return LLMClient.is_configured(llm_cfg)

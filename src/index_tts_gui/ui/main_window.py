@@ -61,6 +61,8 @@ class MainWindow(QMainWindow):
                 "preset": "deepseek",
                 "api_url": "https://api.deepseek.com",
                 "api_key": "",
+                "deepseek_key": "",
+                "mimo_key": "",
                 "model": "deepseek-v4-flash",
                 "timeout": 60,
                 "max_completion_tokens": 2048,
@@ -88,7 +90,7 @@ class MainWindow(QMainWindow):
 
     def _validate_llm_config(self):
         """校验并修正 LLM 配置中的无效模型名。"""
-        from index_tts_gui.core.splitter import LLM_PRESETS
+        from index_tts_gui.core.llm_service import LLM_PRESETS
 
         llm = self._config.get("llm", {})
         preset = llm.get("preset")

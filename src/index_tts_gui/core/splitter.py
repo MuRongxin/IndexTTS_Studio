@@ -343,7 +343,7 @@ def create_splitter(
     if llm_cfg and LLMClient.is_configured(llm_cfg):
         llm = LLMSplitter(
             api_url=llm_cfg["api_url"],
-            api_key=llm_cfg["api_key"],
+            api_key=LLMClient._get_api_key(llm_cfg),
             model=llm_cfg["model"],
             max_completion_tokens=llm_cfg.get(
                 "max_completion_tokens", llm_cfg.get("max_tokens", 2048)

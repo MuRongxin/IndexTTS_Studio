@@ -412,8 +412,8 @@ class ManuscriptPanel(QWidget):
         mode = mode_map[self._mode_combo.currentText()]
 
         if mode == "llm":
-            from index_tts_gui.core.llm_client import LLMClient
-            if not LLMClient.is_configured(self._llm_cfg):
+            from index_tts_gui.core.llm_service import LLMService
+            if not LLMService(self._llm_cfg).is_configured():
                 QMessageBox.warning(
                     self, "未配置 LLM",
                     "请在左侧「设置」中配置 LLM API（MiMo 或 DeepSeek）。"
@@ -430,8 +430,12 @@ class ManuscriptPanel(QWidget):
             llm_cfg=self._llm_cfg,
             max_length=self._max_len_spin.value(),
         )
+        self._worker.progress.connect(self._on_split_progress)
         self._worker.finished.connect(self._on_split_finished)
         self._worker.start()
+
+    def _on_split_progress(self, current: int, total: int, message: str):
+        self._status_label.setText(f"{message} ({current}/{total})")
 
     def _on_split_finished(self, sentences: list, used_llm: bool, msg: str):
         self._btn_split.setEnabled(True)

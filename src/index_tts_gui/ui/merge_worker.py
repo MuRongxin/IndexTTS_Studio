@@ -8,10 +8,7 @@ from index_tts_gui.core.merger import (
     merge_wavs_with_custom_pauses,
     validate_wav_order,
 )
-from index_tts_gui.core.pause_advisor import (
-    LLMPauseAdvisor,
-    is_configured as llm_is_configured,
-)
+from index_tts_gui.core.llm_service import LLMService, LLMServiceError
 from index_tts_gui.core.subtitler import generate_srt_from_sentences_with_pauses
 
 
@@ -57,9 +54,7 @@ class MergeWorker(QThread):
         wavs = collect_sentence_wavs(self._output_dir)
         logger.info("发现音频片段: %d 个", len(wavs))
         if not wavs:
-            raise RuntimeError(
-                f"在 {self._output_dir} 下未找到 sentence_*.wav"
-            )
+            raise RuntimeError(f"在 {self._output_dir} 下未找到 sentence_*.wav")
         if len(wavs) != len(self._sentences):
             raise RuntimeError(
                 f"音频片段数（{len(wavs)}）与句子数（{len(self._sentences)}）不一致"
@@ -87,32 +82,23 @@ class MergeWorker(QThread):
         self.finished.emit(entries)
 
     def _resolve_pauses(self) -> list[float]:
-        punctuation_fallback = self._llm_cfg.get("punctuation_fallback", False)
+        service = LLMService(self._llm_cfg)
 
-        if llm_is_configured(self._llm_cfg):
+        if service.is_configured():
             self.log.emit("🤖 正在询问 LLM 停顿建议…")
             try:
-                advisor = LLMPauseAdvisor(
-                    api_url=self._llm_cfg["api_url"],
-                    api_key=self._llm_cfg["api_key"],
-                    model=self._llm_cfg["model"],
-                    timeout=self._llm_cfg.get("timeout", 60),
-                    prompt_template=self._llm_cfg.get(
-                        "pause_prompt_template", ""
-                    ) or None,
-                )
-                pauses = advisor.advise(self._sentences)
+                pauses = service.advise_pauses(self._sentences)
                 self.log.emit(f"📐 LLM 停顿建议: {pauses}")
                 return pauses
-            except Exception as e:
+            except LLMServiceError as e:
                 logger.exception("LLM 停顿顾问失败")
-                if punctuation_fallback:
+                if service.punctuation_fallback:
                     self.log.emit(f"⚠ LLM 停顿建议失败，回退标点规则: {e}")
                 else:
                     raise RuntimeError(
                         f"LLM 停顿建议失败: {e}。可在设置中启用「标点规则回退」作为备用方案。"
                     )
-        elif not punctuation_fallback:
+        elif not service.punctuation_fallback:
             raise RuntimeError(
                 "未配置 LLM，且未启用标点规则回退。请在设置中配置 LLM 或启用「标点规则回退」。"
             )

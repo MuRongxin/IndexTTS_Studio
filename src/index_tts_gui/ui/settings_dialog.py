@@ -14,8 +14,10 @@ from index_tts_gui.core.tts_client import (
     create_client,
     list_providers,
 )
-from index_tts_gui.core.splitter import (
+from index_tts_gui.core.llm_service import (
     LLM_PRESETS,
+)
+from index_tts_gui.core.splitter import (
     DEFAULT_LLM_PROMPT,
     DEFAULT_MAX_LENGTH,
 )
@@ -216,7 +218,12 @@ class SettingsDialog(QDialog):
         if idx >= 0:
             self._llm_preset.setCurrentIndex(idx)
         self._llm_url.setText(llm.get("api_url", ""))
-        self._llm_key.setText(llm.get("api_key", ""))
+
+        # API Key：优先读 {preset}_key，兜底用旧 api_key
+        old_key = llm.get("api_key", "")
+        preset_key = llm.get(f"{preset}_key", "") or old_key
+        self._llm_key.setText(preset_key)
+
         # 先触发 preset 填充模型列表，再设置当前模型
         saved_model = llm.get("model", "")
         self._on_llm_preset_changed(self._llm_preset.currentIndex())
@@ -291,7 +298,7 @@ class SettingsDialog(QDialog):
 
     def _test_llm_connection(self):
         from PySide6.QtWidgets import QMessageBox
-        from index_tts_gui.core.llm_client import LLMClient
+        from index_tts_gui.core.llm_service import LLMService
 
         url = self._llm_url.text().strip()
         key = self._llm_key.text().strip()
@@ -306,8 +313,9 @@ class SettingsDialog(QDialog):
         self._llm_test_result.setStyleSheet("color: #f57c00;")
 
         try:
-            client = LLMClient(api_url=url, api_key=key, model=model, timeout=15)
-            msg = client.test_connection()
+            cfg = {"api_url": url, "api_key": key, "model": model, "preset": ""}
+            service = LLMService(cfg)
+            msg = service.test()
             self._llm_test_result.setText(f"✅ {msg}")
             self._llm_test_result.setStyleSheet("color: #4caf50;")
         except Exception as e:
@@ -322,6 +330,11 @@ class SettingsDialog(QDialog):
     def _apply_llm_preset(self, preset: str):
         cfg = LLM_PRESETS[preset]
         self._llm_url.setText(cfg["api_url"])
+
+        # 切换预设时，加载该预设保存的 API key
+        llm = self._config.get("llm", {})
+        key = llm.get(f"{preset}_key", "")
+        self._llm_key.setText(key)
 
         self._llm_model.blockSignals(True)
         self._llm_model.clear()
@@ -354,11 +367,16 @@ class SettingsDialog(QDialog):
             )
             return
 
+        current_preset = self._llm_preset.currentData()
+        current_key = self._llm_key.text().strip()
+
         self._config["llm"] = {
             "enabled": self._llm_enabled.isChecked(),
-            "preset": self._llm_preset.currentData(),
+            "preset": current_preset,
             "api_url": self._llm_url.text().strip(),
-            "api_key": self._llm_key.text().strip(),
+            "api_key": current_key,
+            "deepseek_key": self._config.get("llm", {}).get("deepseek_key", ""),
+            "mimo_key": self._config.get("llm", {}).get("mimo_key", ""),
             "model": self._llm_model.currentText().strip(),
             "timeout": self._llm_timeout.value(),
             "max_completion_tokens": self._llm_max_completion_tokens.value(),
@@ -366,6 +384,8 @@ class SettingsDialog(QDialog):
             "user_prompt_template": prompt,
             "punctuation_fallback": self._llm_punctuation_fallback.isChecked(),
         }
+        # 把当前 key 写入对应预设字段
+        self._config["llm"][f"{current_preset}_key"] = current_key
         self.accept()
 
     def get_config(self) -> dict:

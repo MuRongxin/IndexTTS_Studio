@@ -135,11 +135,17 @@ class LLMClient:
         )
         return f"连接成功，模型返回: {content[:50]}"
 
+    @staticmethod
+    def _get_api_key(cfg: dict) -> str:
+        """从配置中取出当前预设对应的 API key。"""
+        preset = cfg.get("preset", "")
+        return (cfg.get(f"{preset}_key", "") or cfg.get("api_key", "")).strip()
+
     @classmethod
     def is_configured(cls, cfg: dict) -> bool:
         """判断配置是否足以发起 LLM 调用。"""
         return bool(
             cfg.get("api_url", "").strip()
-            and cfg.get("api_key", "").strip()
+            and cls._get_api_key(cfg)
             and cfg.get("model", "").strip()
         )
