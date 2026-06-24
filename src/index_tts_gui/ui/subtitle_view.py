@@ -52,6 +52,7 @@ from index_tts_gui.core.subtitler import (
 from index_tts_gui.core.io_ass import entries_to_ass
 from index_tts_gui.ui.audio_engine import AudioEngine
 from index_tts_gui.ui.timeline_canvas import TimelineCanvas
+from index_tts_gui.ui.theme import Theme
 
 
 class SubtitlePanel(QWidget):
@@ -85,34 +86,76 @@ class SubtitlePanel(QWidget):
 
     # ── UI ──
 
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
+    def _card(self, title: str = "") -> QGroupBox:
+        """创建一个现代卡片容器。"""
+        card = QGroupBox()
+        c = Theme.colors
+        r = Theme.radius
+        card.setStyleSheet(f"""
+            QGroupBox {{
+                background: {c.surface};
+                border: 1px solid {c.border};
+                border-radius: {r.md}px;
+                margin-top: 0;
+                padding-top: 0;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: padding;
+                subcontrol-position: top left;
+                left: 0;
+                top: -20px;
+                color: {c.text_secondary};
+                font-size: {Theme.fonts.size_sm}px;
+                font-weight: 600;
+            }}
+        """)
+        if title:
+            card.setTitle(title)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+        return card
 
-        # 顶部音频控制条
+    def _setup_ui(self):
+        c = Theme.colors
+        r = Theme.radius
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+
+        # 顶部音频控制条卡片
+        audio_card = self._card("音频播放")
+        audio_layout = audio_card.layout()
         top = QHBoxLayout()
-        self._btn_load_audio = QPushButton("📂 加载音频")
+        top.setSpacing(10)
+
+        self._btn_load_audio = QPushButton("加载音频")
         self._btn_load_audio.setToolTip("默认会自动加载工程目录下的 full_dub.wav")
+        self._btn_load_audio.setCursor(Qt.PointingHandCursor)
         top.addWidget(self._btn_load_audio)
 
-        self._btn_play = QPushButton("▶ 播放")
+        self._btn_play = QPushButton("播放")
         self._btn_play.setEnabled(False)
+        self._btn_play.setCursor(Qt.PointingHandCursor)
         top.addWidget(self._btn_play)
 
-        self._btn_stop = QPushButton("⏹ 停止")
+        self._btn_stop = QPushButton("停止")
         self._btn_stop.setEnabled(False)
+        self._btn_stop.setCursor(Qt.PointingHandCursor)
         top.addWidget(self._btn_stop)
 
         self._time_label = QLabel("00:00:00.000 / 00:00:00.000")
-        self._time_label.setStyleSheet("font-family: Consolas, monospace;")
+        self._time_label.setStyleSheet(
+            f"font-family: {Theme.fonts.mono}; color: {c.text_secondary}; font-size: {Theme.fonts.size_sm}px;"
+        )
         top.addWidget(self._time_label)
 
         self._seek = QSlider(Qt.Horizontal)
         self._seek.setEnabled(False)
         top.addWidget(self._seek, 1)
 
-        layout.addLayout(top)
+        audio_layout.addLayout(top)
+        layout.addWidget(audio_card)
 
         # 时间轴画布
         self._timeline = TimelineCanvas()
@@ -121,8 +164,11 @@ class SubtitlePanel(QWidget):
 
         # 下部：表格 + 编辑器
         self._splitter = QSplitter(Qt.Vertical)
+        self._splitter.setStyleSheet(f"background: {c.bg};")
 
         # 表格
+        table_card = self._card("字幕列表")
+        table_layout = table_card.layout()
         self._table = QTableWidget()
         self._table.setColumnCount(5)
         self._table.setHorizontalHeaderLabels(["序号", "开始时间", "结束时间", "时长", "文本"])
@@ -130,6 +176,7 @@ class SubtitlePanel(QWidget):
         self._table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._table.setAlternatingRowColors(True)
         self._table.setSortingEnabled(True)
+        self._table.setShowGrid(False)
 
         self._table.setColumnWidth(0, 60)
         self._table.setColumnWidth(1, 110)
@@ -140,24 +187,59 @@ class SubtitlePanel(QWidget):
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
         self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
-        self._splitter.addWidget(self._table)
+        self._table.setStyleSheet(f"""
+            QTableWidget {{
+                border: 1px solid {c.border};
+                border-radius: {r.sm}px;
+                background: {c.surface};
+                gridline-color: transparent;
+            }}
+            QTableWidget::item {{
+                padding: 10px 12px;
+                border-bottom: 1px solid {c.border};
+            }}
+            QTableWidget::item:selected {{
+                background: {c.primary_light};
+                color: {c.text_primary};
+            }}
+            QHeaderView::section {{
+                background: {c.bg};
+                color: {c.text_secondary};
+                padding: 10px 12px;
+                border: none;
+                border-bottom: 1px solid {c.border};
+                font-weight: 600;
+            }}
+        """)
+        table_layout.addWidget(self._table)
+        self._splitter.addWidget(table_card)
 
         # 编辑器 + 样式
-        editor_group = QGroupBox("字幕编辑")
-        editor_layout = QVBoxLayout(editor_group)
-        editor_layout.setContentsMargins(8, 12, 8, 8)
-        editor_layout.setSpacing(6)
+        editor_group = self._card("字幕编辑")
+        editor_layout = editor_group.layout()
 
         self._text_edit = QTextEdit()
         self._text_edit.setAcceptRichText(False)
-        self._text_edit.setMinimumHeight(50)
-        self._text_edit.setMaximumHeight(80)
+        self._text_edit.setMinimumHeight(60)
+        self._text_edit.setMaximumHeight(100)
         self._text_edit.setPlaceholderText("选中字幕后在此编辑文本...")
+        self._text_edit.setStyleSheet(f"""
+            QTextEdit {{
+                border: 1px solid {c.border};
+                border-radius: {r.sm}px;
+                padding: 10px;
+                background: {c.bg};
+            }}
+            QTextEdit:focus {{
+                border-color: {c.primary};
+                background: {c.surface};
+            }}
+        """)
         editor_layout.addWidget(self._text_edit)
 
         # 样式工具栏
         toolbar = QHBoxLayout()
-        toolbar.setSpacing(8)
+        toolbar.setSpacing(10)
 
         self._bold_check = QCheckBox("B")
         self._bold_check.setToolTip("粗体")
@@ -173,11 +255,11 @@ class SubtitlePanel(QWidget):
 
         toolbar.addSpacing(12)
 
-        toolbar.addWidget(QLabel("字体:"))
+        toolbar.addWidget(QLabel("字体"))
         self._font_combo = QFontComboBox()
         toolbar.addWidget(self._font_combo)
 
-        toolbar.addWidget(QLabel("字号:"))
+        toolbar.addWidget(QLabel("字号"))
         self._size_spin = QSpinBox()
         self._size_spin.setRange(8, 200)
         self._size_spin.setValue(25)
@@ -189,14 +271,14 @@ class SubtitlePanel(QWidget):
         self._update_color_btn_icon("#FFFFFF")
         toolbar.addWidget(self._color_btn)
 
-        toolbar.addWidget(QLabel("描边:"))
+        toolbar.addWidget(QLabel("描边"))
         self._outline_spin = QDoubleSpinBox()
         self._outline_spin.setRange(0, 5)
         self._outline_spin.setSingleStep(0.1)
         self._outline_spin.setValue(1.0)
         toolbar.addWidget(self._outline_spin)
 
-        toolbar.addWidget(QLabel("对齐:"))
+        toolbar.addWidget(QLabel("对齐"))
         self._align_combo = QComboBox()
         self._align_combo.addItems([
             "下中", "下左", "下右", "中中", "中左", "中右", "上中", "上左", "上右"
@@ -206,20 +288,17 @@ class SubtitlePanel(QWidget):
 
         self._btn_apply_style_all = QPushButton("应用到全部")
         self._btn_apply_style_all.setToolTip("将当前样式应用到所有字幕")
-        self._btn_apply_style_all.setStyleSheet("""
-            QPushButton {
-                background: #2196F3; color: white;
-                padding: 4px 12px; border-radius: 4px;
-            }
-            QPushButton:hover { background: #1976D2; }
-        """)
+        self._btn_apply_style_all.setProperty("variant", "primary")
+        self._btn_apply_style_all.setCursor(Qt.PointingHandCursor)
         toolbar.addWidget(self._btn_apply_style_all)
 
         toolbar.addStretch()
         editor_layout.addLayout(toolbar)
 
         self._info_label = QLabel("未选中字幕")
-        self._info_label.setStyleSheet("color: #999; font-size: 14px; padding: 4px 0;")
+        self._info_label.setStyleSheet(
+            f"color: {c.text_tertiary}; font-size: {Theme.fonts.size_sm}px; padding: 4px 0;"
+        )
         editor_layout.addWidget(self._info_label)
 
         self._splitter.addWidget(editor_group)
@@ -228,20 +307,25 @@ class SubtitlePanel(QWidget):
 
         # 底部按钮
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
 
-        self._btn_split = QPushButton("✂ 切分")
+        self._btn_split = QPushButton("切分")
         self._btn_split.setToolTip("将选中的字幕从中间时间切分为两条")
         self._btn_split.setEnabled(False)
+        self._btn_split.setCursor(Qt.PointingHandCursor)
         btn_row.addWidget(self._btn_split)
 
-        self._btn_merge = QPushButton("⛓ 合并")
+        self._btn_merge = QPushButton("合并")
         self._btn_merge.setToolTip("合并选中的连续字幕")
         self._btn_merge.setEnabled(False)
+        self._btn_merge.setCursor(Qt.PointingHandCursor)
         btn_row.addWidget(self._btn_merge)
 
-        self._btn_delete = QPushButton("🗑 删除")
+        self._btn_delete = QPushButton("删除")
         self._btn_delete.setToolTip("删除选中的字幕")
         self._btn_delete.setEnabled(False)
+        self._btn_delete.setProperty("variant", "ghost")
+        self._btn_delete.setCursor(Qt.PointingHandCursor)
         btn_row.addWidget(self._btn_delete)
 
         self._btn_strip_punct = QPushButton("去句尾标点")
@@ -251,34 +335,20 @@ class SubtitlePanel(QWidget):
 
         btn_row.addStretch()
 
-        self._btn_regenerate = QPushButton("🔄 重新生成")
+        self._btn_regenerate = QPushButton("重新生成")
         self._btn_regenerate.setToolTip("从 output_tts/ 分句 WAV 重新分析生成")
+        self._btn_regenerate.setCursor(Qt.PointingHandCursor)
         btn_row.addWidget(self._btn_regenerate)
 
-        self._btn_export = QPushButton("📤 导出 SRT")
+        self._btn_export = QPushButton("导出 SRT")
         self._btn_export.setEnabled(False)
-        self._btn_export.setStyleSheet("""
-            QPushButton {
-                background: #4caf50; color: white;
-                padding: 8px 16px; border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background: #388e3c; }
-            QPushButton:disabled { background: #ccc; }
-        """)
+        self._btn_export.setProperty("variant", "primary")
+        self._btn_export.setCursor(Qt.PointingHandCursor)
         btn_row.addWidget(self._btn_export)
 
-        self._btn_export_ass = QPushButton("📤 导出 ASS")
+        self._btn_export_ass = QPushButton("导出 ASS")
         self._btn_export_ass.setEnabled(False)
-        self._btn_export_ass.setStyleSheet("""
-            QPushButton {
-                background: #7e57c2; color: white;
-                padding: 8px 16px; border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background: #5e35b1; }
-            QPushButton:disabled { background: #ccc; }
-        """)
+        self._btn_export_ass.setCursor(Qt.PointingHandCursor)
         btn_row.addWidget(self._btn_export_ass)
 
         layout.addLayout(btn_row)

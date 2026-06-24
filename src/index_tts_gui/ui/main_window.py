@@ -22,6 +22,8 @@ from index_tts_gui.ui.synthesis_panel import SynthesisPanel
 from index_tts_gui.ui.subtitle_view import SubtitlePanel
 from index_tts_gui.ui.settings_dialog import SettingsDialog
 from index_tts_gui.ui.log_status_bar import LogStatusBar, QtLogHandler
+from index_tts_gui.ui.styles import global_stylesheet
+from index_tts_gui.ui.theme import Theme
 
 CONFIG_FILE = "config.json"
 
@@ -167,44 +169,70 @@ class MainWindow(QMainWindow):
 
     def _setup_central(self):
         root = QWidget()
+        root.setStyleSheet(f"background: {Theme.colors.bg};")
         layout = QHBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         # ── 左侧导航栏 ──
         self._sidebar = QFrame()
-        self._sidebar.setFixedWidth(160)
+        self._sidebar.setFixedWidth(200)
         self._sidebar.setObjectName("sidebar")
+        self._sidebar.setStyleSheet(f"""
+            #sidebar {{
+                background: {Theme.colors.surface};
+                border-right: 1px solid {Theme.colors.border};
+            }}
+        """)
         sidebar_layout = QVBoxLayout(self._sidebar)
-        sidebar_layout.setContentsMargins(8, 16, 8, 16)
+        sidebar_layout.setContentsMargins(16, 20, 16, 20)
         sidebar_layout.setSpacing(8)
 
-        title = QLabel("IndexTTS\nStudio")
-        title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("color: #fff; font-size: 16px; font-weight: bold;")
+        # Logo / 标题
+        title = QLabel("IndexTTS Studio")
+        title.setStyleSheet(
+            f"color: {Theme.colors.text_primary}; font-size: 18px; font-weight: 700;"
+        )
         sidebar_layout.addWidget(title)
 
-        sidebar_layout.addSpacing(16)
+        subtitle = QLabel("AI 配音工作台")
+        subtitle.setStyleSheet(
+            f"color: {Theme.colors.text_secondary}; font-size: {Theme.fonts.size_sm}px; margin-bottom: 8px;"
+        )
+        sidebar_layout.addWidget(subtitle)
 
+        sidebar_layout.addSpacing(24)
+
+        # 导航按钮
         self._nav_buttons: list[QPushButton] = []
         nav_items = [
-            ("📝 文稿", 0),
-            ("🎙 合成", 1),
-            ("📄 字幕", 2),
+            ("文稿", 0),
+            ("合成", 1),
+            ("字幕", 2),
         ]
         for label, idx in nav_items:
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setProperty("nav_index", idx)
-            btn.setStyleSheet("""
-                QPushButton {
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet(f"""
+                QPushButton {{
                     text-align: left; padding: 10px 14px;
-                    border: none; border-radius: 6px;
-                    color: #cfd8dc; background: transparent;
-                    font-size: 14px;
-                }
-                QPushButton:hover { background: #37474f; color: #fff; }
-                QPushButton:checked { background: #2979ff; color: #fff; font-weight: bold; }
+                    border: none; border-radius: {Theme.radius.sm}px;
+                    color: {Theme.colors.text_secondary};
+                    background: transparent;
+                    font-size: {Theme.fonts.size_md}px;
+                    font-weight: 500;
+                }}
+                QPushButton:hover {{
+                    background: {Theme.colors.bg};
+                    color: {Theme.colors.text_primary};
+                }}
+                QPushButton:checked {{
+                    background: {Theme.colors.primary_light};
+                    color: {Theme.colors.primary};
+                    font-weight: 600;
+                }}
             """)
             btn.clicked.connect(self._on_nav_clicked)
             sidebar_layout.addWidget(btn)
@@ -212,60 +240,89 @@ class MainWindow(QMainWindow):
 
         sidebar_layout.addStretch()
 
-        # 工程按钮
-        project_btn_style = """
-            QPushButton {
-                text-align: left; padding: 8px 12px;
-                border: 1px solid #546e7a; border-radius: 6px;
-                color: #cfd8dc; background: transparent;
-                font-size: 13px;
-            }
-            QPushButton:hover { background: #37474f; color: #fff; }
-        """
+        # 工程区域
+        project_section = QFrame()
+        project_section.setStyleSheet(f"""
+            QFrame {{
+                background: {Theme.colors.bg};
+                border-radius: {Theme.radius.md}px;
+            }}
+        """)
+        project_layout = QVBoxLayout(project_section)
+        project_layout.setContentsMargins(12, 12, 12, 12)
+        project_layout.setSpacing(8)
 
-        btn_new = QPushButton("➕ 新建工程")
-        btn_new.setStyleSheet(project_btn_style)
-        btn_new.clicked.connect(self._new_project)
-        sidebar_layout.addWidget(btn_new)
+        project_header = QLabel("工程")
+        project_header.setStyleSheet(
+            f"color: {Theme.colors.text_tertiary}; font-size: {Theme.fonts.size_sm}px; font-weight: 600;"
+        )
+        project_layout.addWidget(project_header)
 
-        btn_open = QPushButton("📂 打开工程")
-        btn_open.setStyleSheet(project_btn_style)
-        btn_open.clicked.connect(self._open_project)
-        sidebar_layout.addWidget(btn_open)
+        self._project_label = QLabel("未命名工程")
+        self._project_label.setStyleSheet(
+            f"color: {Theme.colors.text_primary}; font-size: {Theme.fonts.size_sm}px; font-weight: 500;"
+        )
+        self._project_label.setWordWrap(True)
+        project_layout.addWidget(self._project_label)
 
-        btn_save = QPushButton("💾 保存工程")
-        btn_save.setStyleSheet(project_btn_style)
-        btn_save.clicked.connect(self._save_project)
-        sidebar_layout.addWidget(btn_save)
+        project_btns = QHBoxLayout()
+        project_btns.setSpacing(6)
+        for label, slot in [("新建", self._new_project), ("打开", self._open_project), ("保存", self._save_project)]:
+            btn = QPushButton(label)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {Theme.colors.surface};
+                    color: {Theme.colors.text_secondary};
+                    border: 1px solid {Theme.colors.border};
+                    border-radius: {Theme.radius.sm}px;
+                    padding: 4px 8px;
+                    font-size: {Theme.fonts.size_sm}px;
+                }}
+                QPushButton:hover {{
+                    background: {Theme.colors.surface_hover};
+                    color: {Theme.colors.text_primary};
+                    border-color: {Theme.colors.text_tertiary};
+                }}
+            """)
+            btn.clicked.connect(slot)
+            project_btns.addWidget(btn)
+        project_layout.addLayout(project_btns)
 
-        sidebar_layout.addSpacing(8)
+        sidebar_layout.addWidget(project_section)
+        sidebar_layout.addSpacing(12)
 
         # 设置按钮
-        btn_settings = QPushButton("⚙ 设置")
-        btn_settings.setStyleSheet("""
-            QPushButton {
+        btn_settings = QPushButton("设置")
+        btn_settings.setCursor(Qt.PointingHandCursor)
+        btn_settings.setStyleSheet(f"""
+            QPushButton {{
                 text-align: left; padding: 10px 14px;
-                border: 1px solid #546e7a; border-radius: 6px;
-                color: #cfd8dc; background: transparent;
-                font-size: 14px;
-            }
-            QPushButton:hover { background: #37474f; color: #fff; }
+                border: 1px solid {Theme.colors.border};
+                border-radius: {Theme.radius.sm}px;
+                color: {Theme.colors.text_secondary};
+                background: {Theme.colors.surface};
+                font-size: {Theme.fonts.size_md}px;
+            }}
+            QPushButton:hover {{
+                background: {Theme.colors.bg};
+                color: {Theme.colors.text_primary};
+            }}
         """)
         btn_settings.clicked.connect(self._open_settings)
         sidebar_layout.addWidget(btn_settings)
 
-        # 当前工程名称
-        self._project_label = QLabel("")
-        self._project_label.setAlignment(Qt.AlignCenter)
-        self._project_label.setStyleSheet(
-            "color: #90a4ae; font-size: 11px; padding-top: 6px;"
-        )
-        sidebar_layout.addWidget(self._project_label)
-
         layout.addWidget(self._sidebar)
 
         # ── 右侧内容区 ──
+        content = QWidget()
+        content.setStyleSheet(f"background: {Theme.colors.bg};")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(20, 20, 20, 20)
+        content_layout.setSpacing(0)
+
         self._stack = QStackedWidget()
+        self._stack.setStyleSheet(f"background: {Theme.colors.bg};")
         self._stack.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Expanding
         )
@@ -282,7 +339,8 @@ class MainWindow(QMainWindow):
         )
         self._stack.addWidget(self.subtitle_panel)
 
-        layout.addWidget(self._stack)
+        content_layout.addWidget(self._stack)
+        layout.addWidget(content)
 
         # 信号链
         self.manuscript_panel.sentences_ready.connect(
@@ -403,15 +461,10 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _apply_stylesheet(self):
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #f5f5f5;
-            }
-            #sidebar {
-                background-color: #263238;
-                border-right: 1px solid #1c252a;
-            }
-            QStatusBar {
-                background: #e8e8e8;
-            }
+        self.setStyleSheet(global_stylesheet() + f"""
+            QStatusBar {{
+                background: {Theme.colors.surface};
+                color: {Theme.colors.text_secondary};
+                border-top: 1px solid {Theme.colors.border};
+            }}
         """)

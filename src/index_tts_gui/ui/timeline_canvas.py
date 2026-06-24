@@ -43,6 +43,7 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from index_tts_gui.core.subtitle import SubtitleItem, SubtitleTrack
 from index_tts_gui.ui.audio_engine import AudioEngine
+from index_tts_gui.ui.theme import Theme
 
 
 class TimelineCanvas(QWidget):
@@ -61,26 +62,27 @@ class TimelineCanvas(QWidget):
     BLOCK_PADDING = 4
     HANDLE_WIDTH = 5
 
-    COLOR_BG = QColor(37, 37, 37)
-    COLOR_HEADER = QColor(51, 51, 51)
-    COLOR_TICK = QColor(85, 85, 85)
-    COLOR_TICK_TEXT = QColor(170, 170, 170)
-    COLOR_WAVEFORM = QColor(76, 175, 80)
-    COLOR_WAVEFORM_ALPHA = 153
-    COLOR_PLAYHEAD = QColor(255, 50, 50)
-    COLOR_SELECTION = QColor(255, 215, 0)
-    COLOR_BLOCK_TEXT = QColor(238, 238, 238)
-    COLOR_HANDLE = QColor(255, 255, 255, 128)
+    # 从 Theme 读取配色
+    COLOR_BG = QColor(Theme.colors.bg)
+    COLOR_HEADER = QColor(Theme.colors.surface)
+    COLOR_TICK = QColor(Theme.colors.border)
+    COLOR_TICK_TEXT = QColor(Theme.colors.text_secondary)
+    COLOR_WAVEFORM = QColor(Theme.colors.primary)
+    COLOR_WAVEFORM_ALPHA = 180
+    COLOR_PLAYHEAD = QColor(Theme.colors.error)
+    COLOR_SELECTION = QColor(Theme.colors.primary)
+    COLOR_BLOCK_TEXT = QColor(Theme.colors.text_primary)
+    COLOR_HANDLE = QColor(Theme.colors.primary_light)
 
     BLOCK_COLORS = [
-        QColor(100, 150, 255),
-        QColor(100, 220, 150),
-        QColor(255, 180, 100),
-        QColor(220, 140, 255),
-        QColor(255, 220, 100),
-        QColor(255, 130, 130),
-        QColor(130, 220, 220),
-        QColor(200, 200, 200),
+        QColor("#93C5FD"),
+        QColor("#86EFAC"),
+        QColor("#FCD34D"),
+        QColor("#D8B4FE"),
+        QColor("#FDE047"),
+        QColor("#FCA5A5"),
+        QColor("#99F6E4"),
+        QColor("#D1D5DB"),
     ]
 
     def __init__(self, parent: Optional[QWidget] = None):
@@ -377,15 +379,15 @@ class TimelineCanvas(QWidget):
                 pen.setWidth(2)
                 painter.setPen(pen)
             elif idx == self.hover_index:
-                pen = QPen(QColor(200, 200, 200))
+                pen = QPen(QColor(Theme.colors.text_tertiary))
                 pen.setWidth(1)
                 painter.setPen(pen)
             else:
-                pen = QPen(color.darker(120))
+                pen = QPen(QColor(Theme.colors.border))
                 pen.setWidth(1)
                 painter.setPen(pen)
 
-            painter.drawRoundedRect(block_rect, 3, 3)
+            painter.drawRoundedRect(block_rect, 6, 6)
 
             if w > 30:
                 text = item.text[:15] if len(item.text) <= 15 else item.text[:14] + "..."

@@ -12,6 +12,7 @@ from PySide6.QtGui import QKeyEvent
 
 from index_tts_gui.ui.split_worker import SplitWorker
 from index_tts_gui.core.project import Project
+from index_tts_gui.ui.theme import Theme
 
 
 PUNCT = '。！？，、；：'
@@ -94,42 +95,69 @@ class ManuscriptPanel(QWidget):
         self._setup_ui()
         self._load_from_project()
 
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
+    def _card(self, title: str = "") -> QFrame:
+        """创建一个现代卡片容器。"""
+        card = QFrame()
+        c = Theme.colors
+        r = Theme.radius
+        card.setStyleSheet(f"""
+            QFrame {{
+                background: {c.surface};
+                border: 1px solid {c.border};
+                border-radius: {r.md}px;
+            }}
+        """)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
+        if title:
+            lbl = QLabel(title)
+            lbl.setStyleSheet(
+                f"font-size: {Theme.fonts.size_lg}px; font-weight: 700; color: {c.text_primary};"
+            )
+            layout.addWidget(lbl)
+        return card
+
+    def _setup_ui(self):
+        c = Theme.colors
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
 
         # ── 顶部工具栏 ──
         toolbar = QFrame()
-        toolbar.setStyleSheet("""
-            QFrame {
-                background: #fafafa;
-                border: 1px solid #e0e0e0;
-                border-radius: 6px;
-            }
+        toolbar.setStyleSheet(f"""
+            QFrame {{
+                background: {c.surface};
+                border: 1px solid {c.border};
+                border-radius: {Theme.radius.md}px;
+            }}
         """)
         tb_layout = QHBoxLayout(toolbar)
-        tb_layout.setContentsMargins(10, 8, 10, 8)
-        tb_layout.setSpacing(12)
+        tb_layout.setContentsMargins(12, 10, 12, 10)
+        tb_layout.setSpacing(10)
 
-        btn_open = QPushButton("📂 打开")
+        btn_open = QPushButton("打开")
         btn_open.setToolTip("打开 .txt / .md")
         btn_open.clicked.connect(self._open_file)
         tb_layout.addWidget(btn_open)
 
-        btn_save = QPushButton("💾 保存")
+        btn_save = QPushButton("保存")
         btn_save.setToolTip("保存当前文稿")
         btn_save.clicked.connect(self._save_file)
         tb_layout.addWidget(btn_save)
 
-        btn_clear = QPushButton("🗑 清空")
+        btn_clear = QPushButton("清空")
         btn_clear.setToolTip("清空编辑区")
+        btn_clear.setProperty("variant", "ghost")
         btn_clear.clicked.connect(self._clear_text)
         tb_layout.addWidget(btn_clear)
 
-        tb_layout.addSpacing(16)
+        tb_layout.addSpacing(20)
 
-        tb_layout.addWidget(QLabel("模式:"))
+        mode_lbl = QLabel("拆分模式")
+        mode_lbl.setStyleSheet(f"color: {c.text_secondary};")
+        tb_layout.addWidget(mode_lbl)
         self._mode_combo = QComboBox()
         self._mode_combo.addItems(["LLM", "自动", "规则"])
         self._mode_combo.setToolTip(
@@ -139,7 +167,9 @@ class ManuscriptPanel(QWidget):
         )
         tb_layout.addWidget(self._mode_combo)
 
-        tb_layout.addWidget(QLabel("句长:"))
+        len_lbl = QLabel("最大句长")
+        len_lbl.setStyleSheet(f"color: {c.text_secondary};")
+        tb_layout.addWidget(len_lbl)
         self._max_len_spin = QSpinBox()
         self._max_len_spin.setRange(0, 200)
         self._max_len_spin.setValue(30)
@@ -149,17 +179,10 @@ class ManuscriptPanel(QWidget):
 
         tb_layout.addStretch()
 
-        self._btn_split = QPushButton("🔍 拆分预览")
+        self._btn_split = QPushButton("拆分预览")
         self._btn_split.setToolTip("开始拆分文稿")
-        self._btn_split.setStyleSheet("""
-            QPushButton {
-                background: #2979ff; color: white;
-                padding: 6px 18px; border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background: #1565c0; }
-            QPushButton:disabled { background: #ccc; }
-        """)
+        self._btn_split.setProperty("variant", "primary")
+        self._btn_split.setCursor(Qt.PointingHandCursor)
         self._btn_split.clicked.connect(self._do_split)
         tb_layout.addWidget(self._btn_split)
 
@@ -167,17 +190,26 @@ class ManuscriptPanel(QWidget):
 
         # ── 统计栏 ──
         stats = QFrame()
-        stats.setStyleSheet("""
-            QFrame { background: #f5f5f5; border-radius: 4px; }
-            QLabel { color: #555; font-size: 12px; }
+        stats.setStyleSheet(f"""
+            QFrame {{
+                background: {c.surface};
+                border: 1px solid {c.border};
+                border-radius: {Theme.radius.sm}px;
+            }}
+            QLabel {{
+                color: {c.text_secondary};
+                font-size: {Theme.fonts.size_sm}px;
+            }}
         """)
         stats_layout = QHBoxLayout(stats)
-        stats_layout.setContentsMargins(10, 6, 10, 6)
+        stats_layout.setContentsMargins(12, 8, 12, 8)
 
         self._stats_total = QLabel("总字数: 0")
         self._stats_sentences = QLabel("已拆分: 0 句")
         self._status_label = QLabel("")
-        self._status_label.setStyleSheet("color: #2979ff; font-weight: bold;")
+        self._status_label.setStyleSheet(
+            f"color: {c.primary}; font-weight: 600; font-size: {Theme.fonts.size_sm}px;"
+        )
         self._status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         stats_layout.addWidget(self._stats_total)
@@ -189,43 +221,41 @@ class ManuscriptPanel(QWidget):
 
         # ── 主区域 ──
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setStyleSheet(f"background: {c.bg};")
 
-        # 左侧：编辑器
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(6)
-
-        lbl_editor = QLabel("📝 文稿内容")
-        lbl_editor.setStyleSheet("font-weight: bold; color: #333;")
-        left_layout.addWidget(lbl_editor)
+        # 左侧：编辑器卡片
+        left_card = self._card("文稿内容")
+        left_layout = left_card.layout()
 
         self._editor = QPlainTextEdit()
-        self._editor.setPlaceholderText("在此粘贴、打开或输入文稿…")
+        self._editor.setPlaceholderText("在此粘贴、打开或输入文稿，然后点击「拆分预览」…")
         self._editor.textChanged.connect(self._on_text_changed)
-        self._editor.setStyleSheet("""
-            QPlainTextEdit {
-                border: 1px solid #ddd;
-                border-radius: 6px;
-                padding: 8px;
-                font-size: 14px;
-                line-height: 1.5;
-            }
+        self._editor.setStyleSheet(f"""
+            QPlainTextEdit {{
+                border: 1px solid {c.border};
+                border-radius: {Theme.radius.sm}px;
+                padding: 12px;
+                font-size: {Theme.fonts.size_md}px;
+                line-height: 1.6;
+                background: {c.bg};
+            }}
+            QPlainTextEdit:focus {{
+                border-color: {c.primary};
+                background: {c.surface};
+            }}
         """)
         left_layout.addWidget(self._editor, 1)
 
-        splitter.addWidget(left)
+        splitter.addWidget(left_card)
         splitter.setStretchFactor(0, 1)
 
-        # 右侧：拆分结果表格
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(6)
+        # 右侧：拆分结果卡片
+        right_card = self._card("拆分结果")
+        right_layout = right_card.layout()
 
-        lbl_result = QLabel("📋 拆分结果（可直接编辑）")
-        lbl_result.setStyleSheet("font-weight: bold; color: #333;")
-        right_layout.addWidget(lbl_result)
+        hint = QLabel("可直接编辑单元格；Enter 切分、Backspace 合并")
+        hint.setStyleSheet(f"color: {c.text_tertiary}; font-size: {Theme.fonts.size_sm}px;")
+        right_layout.addWidget(hint)
 
         self._table = QTableWidget()
         self._table.setColumnCount(2)
@@ -235,22 +265,32 @@ class ManuscriptPanel(QWidget):
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.verticalHeader().setVisible(False)
-        self._table.setShowGrid(True)
-        self._table.setStyleSheet("""
-            QTableWidget {
-                border: 1px solid #ddd;
-                border-radius: 6px;
-                gridline-color: #e0e0e0;
-                font-size: 14px;
-            }
-            QTableWidget::item {
-                padding: 6px;
-                border-bottom: 1px solid #e0e0e0;
-            }
-            QTableWidget::item:selected {
-                background: #e3f2fd;
-                color: #000;
-            }
+        self._table.setShowGrid(False)
+        self._table.setAlternatingRowColors(True)
+        self._table.setStyleSheet(f"""
+            QTableWidget {{
+                border: 1px solid {c.border};
+                border-radius: {Theme.radius.sm}px;
+                background: {c.surface};
+                gridline-color: transparent;
+                font-size: {Theme.fonts.size_md}px;
+            }}
+            QTableWidget::item {{
+                padding: 10px 12px;
+                border-bottom: 1px solid {c.border};
+            }}
+            QTableWidget::item:selected {{
+                background: {c.primary_light};
+                color: {c.text_primary};
+            }}
+            QHeaderView::section {{
+                background: {c.bg};
+                color: {c.text_secondary};
+                padding: 10px 12px;
+                border: none;
+                border-bottom: 1px solid {c.border};
+                font-weight: 600;
+            }}
         """)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -264,10 +304,10 @@ class ManuscriptPanel(QWidget):
 
         right_layout.addWidget(self._table, 1)
 
-        splitter.addWidget(right)
+        splitter.addWidget(right_card)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([500, 500])
-        splitter.setHandleWidth(8)
+        splitter.setSizes([520, 520])
+        splitter.setHandleWidth(6)
 
         layout.addWidget(splitter, 1)
 

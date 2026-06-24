@@ -15,6 +15,7 @@ from index_tts_gui.core.merger import collect_sentence_wavs
 from index_tts_gui.ui.merge_worker import MergeWorker
 from index_tts_gui.ui.synthesis_worker import SynthesisWorker
 from index_tts_gui.ui.voice_panel import VoicePanel
+from index_tts_gui.ui.theme import Theme
 
 
 logger = logging.getLogger("index_tts")
@@ -47,105 +48,148 @@ class SynthesisPanel(QWidget):
             self.set_sentences(self._project.sentences)
         self._refresh_merge_button()
 
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
+    def _card(self, title: str = "") -> QGroupBox:
+        """创建一个现代卡片容器。"""
+        card = QGroupBox()
+        c = Theme.colors
+        r = Theme.radius
+        card.setStyleSheet(f"""
+            QGroupBox {{
+                background: {c.surface};
+                border: 1px solid {c.border};
+                border-radius: {r.md}px;
+                margin-top: 0;
+                padding-top: 0;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: padding;
+                subcontrol-position: top left;
+                left: 0;
+                top: -20px;
+                color: {c.text_secondary};
+                font-size: {Theme.fonts.size_sm}px;
+                font-weight: 600;
+            }}
+        """)
+        if title:
+            card.setTitle(title)
+        layout = QVBoxLayout(card)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
+        return card
+
+    def _setup_ui(self):
+        c = Theme.colors
+        r = Theme.radius
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
 
         # ── 音色选择区（嵌入 VoicePanel）──
         layout.addWidget(self._voice_panel)
 
-        # 设置区
-        gb = QGroupBox("合成设置")
-        gb_layout = QHBoxLayout(gb)
+        # ── 合成控制卡片 ──
+        ctrl_card = self._card("合成控制")
+        ctrl_layout = ctrl_card.layout()
 
-        gb_layout.addWidget(QLabel("工程输出目录:"))
+        # 步骤指示
+        steps = QHBoxLayout()
+        steps.setSpacing(8)
+        for i, text in enumerate(["1 选择音色", "2 开始合成", "3 合并音频"], 1):
+            step_lbl = QLabel(text)
+            step_lbl.setStyleSheet(
+                f"color: {c.text_secondary}; font-size: {Theme.fonts.size_sm}px; font-weight: 500;"
+            )
+            steps.addWidget(step_lbl)
+            if i < 3:
+                sep = QLabel("→")
+                sep.setStyleSheet(f"color: {c.border};")
+                steps.addWidget(sep)
+        steps.addStretch()
+        ctrl_layout.addLayout(steps)
+
+        # 输出目录
+        dir_layout = QHBoxLayout()
+        dir_lbl = QLabel("输出目录")
+        dir_lbl.setStyleSheet(f"color: {c.text_secondary};")
+        dir_layout.addWidget(dir_lbl)
         self._dir_label = QLabel(self._project.output_dir)
-        self._dir_label.setStyleSheet("font-weight: bold;")
+        self._dir_label.setStyleSheet(
+            f"font-weight: 600; color: {c.text_primary};"
+        )
         self._dir_label.setToolTip("合成输出保存在当前工程文件夹内")
-        gb_layout.addWidget(self._dir_label)
-
-        gb_layout.addStretch()
-        layout.addWidget(gb)
+        dir_layout.addWidget(self._dir_label)
+        dir_layout.addStretch()
+        ctrl_layout.addLayout(dir_layout)
 
         # 进度条
         self._progress = QProgressBar()
         self._progress.setMinimum(0)
         self._progress.setMaximum(100)
         self._progress.setValue(0)
-        layout.addWidget(self._progress)
+        self._progress.setTextVisible(True)
+        ctrl_layout.addWidget(self._progress)
 
         self._status_label = QLabel("等待开始…")
-        layout.addWidget(self._status_label)
+        self._status_label.setStyleSheet(f"color: {c.text_secondary};")
+        ctrl_layout.addWidget(self._status_label)
 
         # 控制按钮
         ctrl = QHBoxLayout()
-        self._btn_start = QPushButton("▶ 开始合成")
-        self._btn_start.setStyleSheet("""
-            QPushButton {
-                background: #2979ff; color: white;
-                padding: 10px 24px; border-radius: 6px;
-                font-size: 14px; font-weight: bold;
-            }
-            QPushButton:hover { background: #1565c0; }
-            QPushButton:disabled { background: #ccc; }
-        """)
+        ctrl.setSpacing(10)
+
+        self._btn_start = QPushButton("开始合成")
+        self._btn_start.setProperty("variant", "primary")
+        self._btn_start.setCursor(Qt.PointingHandCursor)
+        self._btn_start.setMinimumHeight(40)
         self._btn_start.clicked.connect(self._start)
         ctrl.addWidget(self._btn_start)
 
-        self._btn_stop = QPushButton("⏹ 停止")
+        self._btn_stop = QPushButton("停止")
         self._btn_stop.setEnabled(False)
-        self._btn_stop.setStyleSheet("""
-            QPushButton {
-                background: #d32f2f; color: white;
-                padding: 10px 24px; border-radius: 6px;
-                font-size: 14px; font-weight: bold;
-            }
-            QPushButton:hover { background: #b71c1c; }
-            QPushButton:disabled { background: #ccc; }
-        """)
+        self._btn_stop.setProperty("variant", "danger")
+        self._btn_stop.setCursor(Qt.PointingHandCursor)
+        self._btn_stop.setMinimumHeight(40)
         self._btn_stop.clicked.connect(self._stop)
         ctrl.addWidget(self._btn_stop)
 
-        self._btn_merge = QPushButton("🔀 合并完整音频")
+        self._btn_merge = QPushButton("合并完整音频")
         self._btn_merge.setEnabled(False)
-        self._btn_merge.setStyleSheet("""
-            QPushButton {
-                background: #ff9800; color: white;
-                padding: 10px 24px; border-radius: 6px;
-                font-size: 14px; font-weight: bold;
-            }
-            QPushButton:hover { background: #f57c00; }
-            QPushButton:disabled { background: #ccc; }
-        """)
+        self._btn_merge.setCursor(Qt.PointingHandCursor)
+        self._btn_merge.setMinimumHeight(40)
         self._btn_merge.clicked.connect(self._merge_full_audio)
         ctrl.addWidget(self._btn_merge)
 
-        self._btn_clear_output = QPushButton("🗑 清空输出")
-        self._btn_clear_output.setStyleSheet("""
-            QPushButton {
-                background: #757575; color: white;
-                padding: 10px 24px; border-radius: 6px;
-                font-size: 14px; font-weight: bold;
-            }
-            QPushButton:hover { background: #616161; }
-        """)
+        self._btn_clear_output = QPushButton("清空输出")
+        self._btn_clear_output.setProperty("variant", "ghost")
+        self._btn_clear_output.setCursor(Qt.PointingHandCursor)
         self._btn_clear_output.clicked.connect(self._clear_output_dir)
         ctrl.addWidget(self._btn_clear_output)
 
         ctrl.addStretch()
-        layout.addLayout(ctrl)
+        ctrl_layout.addLayout(ctrl)
+        layout.addWidget(ctrl_card)
 
-        # 日志
-        log_label = QLabel("日志:")
-        log_label.setStyleSheet("font-weight: bold; margin-top: 8px;")
-        layout.addWidget(log_label)
+        # ── 日志卡片 ──
+        log_card = self._card("运行日志")
+        log_layout = log_card.layout()
 
         self._log = QPlainTextEdit()
         self._log.setReadOnly(True)
         self._log.setMaximumBlockCount(500)
-        self._log.setStyleSheet("background: #1e1e1e; color: #d4d4d4; font-family: monospace;")
-        layout.addWidget(self._log)
+        self._log.setStyleSheet(f"""
+            QPlainTextEdit {{
+                background: {c.bg};
+                color: {c.text_primary};
+                border: 1px solid {c.border};
+                border-radius: {r.sm}px;
+                font-family: {Theme.fonts.mono};
+                font-size: {Theme.fonts.size_sm}px;
+                padding: 10px;
+            }}
+        """)
+        log_layout.addWidget(self._log)
+        layout.addWidget(log_card, 1)
 
     def set_sentences(self, sentences: list[str]):
         self._sentences = sentences
@@ -169,10 +213,10 @@ class SynthesisPanel(QWidget):
 
     def _start(self):
         if not self._sentences:
-            self._log_msg("⚠ 请先在文稿面板拆分句子")
+            self._log_msg("请先在文稿面板拆分句子")
             return
         if not self._audio_name:
-            self._log_msg("⚠ 请先在音色面板上传参考音频")
+            self._log_msg("请先在音色面板上传参考音频")
             return
 
         self._was_canceled = False
@@ -216,7 +260,7 @@ class SynthesisPanel(QWidget):
             return
 
         self._progress.setValue(self._progress.maximum())
-        self._status_label.setText("合成完成 ✓")
+        self._status_label.setText("合成完成")
         self._log_msg("━━━━━━━━━━ 完成 ━━━━━━━━━━")
         self._btn_merge.setEnabled(True)
         self.synthesis_done.emit(self._output_dir)
@@ -238,9 +282,9 @@ class SynthesisPanel(QWidget):
                     os.remove(path)
                     removed += 1
                 except Exception as e:
-                    self._log_msg(f"✗ 删除失败 {path}: {e}")
+                    self._log_msg(f"删除失败 {path}: {e}")
 
-        self._log_msg(f"🗑 已清空输出目录，删除 {removed} 个文件")
+        self._log_msg(f"已清空输出目录，删除 {removed} 个文件")
         self._project.pauses = []
         self._project.save()
         self._refresh_merge_button()
@@ -248,7 +292,7 @@ class SynthesisPanel(QWidget):
     def _merge_full_audio(self):
         """把 output_dir 里的片段合并成完整音频，在后台线程执行。"""
         if not self._sentences:
-            self._log_msg("⚠ 没有句子，无法合并")
+            self._log_msg("没有句子，无法合并")
             return
 
         logger.info("开始合并: output_dir=%s sentences=%d", self._output_dir, len(self._sentences))
@@ -283,7 +327,7 @@ class SynthesisPanel(QWidget):
         self.merge_done.emit(entries)
 
     def _on_merge_error(self, msg: str):
-        self._log_msg(f"✗ 合并失败: {msg}")
+        self._log_msg(f"合并失败: {msg}")
         self._status_label.setText("合并失败")
         self._btn_merge.setEnabled(True)
 
