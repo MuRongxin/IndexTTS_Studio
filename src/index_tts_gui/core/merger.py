@@ -208,7 +208,7 @@ def parse_sentence_wav_name(name: str) -> tuple[int, str] | None:
         return None
     body = name[len("sentence_"):-len(".wav")]
     # 匹配：两位数字 + 可选的下划线文本
-    m = re.match(r"^(\d{2})(?:_(.*))?$", body)
+    m = re.match(r"^(\d+)(?:_(.*))?$", body)
     if not m:
         return None
     index = int(m.group(1))

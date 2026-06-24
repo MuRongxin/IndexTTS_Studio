@@ -223,6 +223,9 @@ class SynthesisPanel(QWidget):
 
     def _log_msg(self, msg: str):
         self._log.appendPlainText(msg)
+        # 强制刷新，防止长操作时日志区冻结
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
 
     def _clear_output_dir(self):
         """清空输出目录下的生成文件。"""

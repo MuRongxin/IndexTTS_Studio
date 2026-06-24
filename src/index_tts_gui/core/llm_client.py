@@ -119,7 +119,7 @@ class LLMClient:
             len(completion.choices),
             len(content),
         )
-        logger.debug("LLM 响应内容: %s", content[:1000])
+        logger.info("LLM 响应内容: %s", content)
 
         return content
 

@@ -87,8 +87,11 @@ class MergeWorker(QThread):
         if service.is_configured():
             self.log.emit("🤖 正在询问 LLM 停顿建议…")
             try:
-                pauses = service.advise_pauses(self._sentences)
-                self.log.emit(f"📐 LLM 停顿建议: {pauses}")
+                pauses = service.advise_pauses(
+                    self._sentences,
+                    on_progress=lambda c, t, m: self.log.emit(f"  {m}"),
+                )
+                self.log.emit(f"📐 LLM 停顿建议完成: {len(pauses)} 个")
                 return pauses
             except LLMServiceError as e:
                 logger.exception("LLM 停顿顾问失败")

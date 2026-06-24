@@ -52,6 +52,7 @@ from index_tts_gui.core.subtitler import (
 from index_tts_gui.core.io_ass import entries_to_ass
 from index_tts_gui.ui.audio_engine import AudioEngine
 from index_tts_gui.ui.timeline_canvas import TimelineCanvas
+from index_tts_gui.ui.subtitle_regenerate_worker import SubtitleRegenerateWorker
 
 
 class SubtitlePanel(QWidget):
@@ -67,6 +68,7 @@ class SubtitlePanel(QWidget):
         self._current_edit_index = -1
         self._undo_stack: list[list[SubtitleEntry]] = []
         self._undo_max = 50
+        self._regen_worker: "SubtitleRegenerateWorker | None" = None
 
         # 音频
         self._player = QMediaPlayer()
@@ -357,7 +359,7 @@ class SubtitlePanel(QWidget):
             self._btn_stop.setEnabled(False)
 
     def _try_auto_load_subtitles(self):
-        """打开工程后自动从已有 WAV 重建字幕，优先使用存储的停顿数据。"""
+        """打开工程后后台自动从已有 WAV 重建字幕。"""
         if not self._project or not self._project.sentences:
             return
         output_dir = self._output_dir()
@@ -368,19 +370,8 @@ class SubtitlePanel(QWidget):
         ])
         if len(wavs) != len(self._project.sentences):
             return
-        try:
-            pauses = self._project.pauses if self._project.pauses else None
-            if pauses and len(pauses) == len(self._project.sentences):
-                entries = generate_srt_from_sentences_with_pauses(
-                    self._project.sentences, wavs, pauses
-                )
-            else:
-                entries = generate_srt_from_sentences(
-                    "", self._project.sentences, wavs
-                )
-            self.load_entries(entries)
-        except Exception:
-            pass  # 自动加载失败不弹窗，用户可手动点击重新生成
+        pauses = self._project.pauses if self._project.pauses else None
+        self._start_regen_worker(self._project.sentences, output_dir, pauses, silent=True)
 
     def _load_audio(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1060,57 +1051,46 @@ class SubtitlePanel(QWidget):
 
     # ── 重新生成 / 导出 ──
 
+    def _start_regen_worker(
+        self, sentences: list[str], output_dir: str,
+        pauses: list[float] | None = None, silent: bool = False,
+    ):
+        """启动后台字幕生成线程。silent=True 时失败不弹窗。"""
+        self._regen_worker = SubtitleRegenerateWorker(sentences, output_dir, pauses)
+        self._regen_worker.finished.connect(self._on_regen_finished)
+        if silent:
+            self._regen_worker.error.connect(lambda msg: None)  # 静默
+        else:
+            self._regen_worker.error.connect(self._on_regen_error)
+        self._regen_worker.start()
+
+    def _on_regen_finished(self, entries):
+        self.load_entries(entries)
+
+    def _on_regen_error(self, msg: str):
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.warning(self, "错误", msg)
+
     def _regenerate(self):
-        try:
-            output_dir = self._output_dir()
-            sentences = []
-            if self._project:
-                sentences = self._project.sentences
+        """从当前工程输出目录后台重新生成字幕。"""
+        output_dir = self._output_dir()
+        sentences: list[str] = []
+        if self._project:
+            sentences = list(self._project.sentences)
 
-            if not sentences and self._get_manuscript_text is not None:
-                text = self._get_manuscript_text()
-                if text:
-                    from index_tts_gui.core.subtitler import _split_manuscript
-                    sentences = _split_manuscript(text)
+        if not sentences and self._get_manuscript_text is not None:
+            text = self._get_manuscript_text()
+            if text:
+                from index_tts_gui.core.subtitler import _split_manuscript
+                sentences = _split_manuscript(text)
 
-            if not sentences:
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.warning(self, "错误", "没有可用句子，请先拆分文稿")
-                return
-
-            wavs = sorted([
-                os.path.join(output_dir, f)
-                for f in os.listdir(output_dir)
-                if f.startswith("sentence_") and f.endswith(".wav")
-            ])
-
-            if not wavs:
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.warning(self, "错误", f"{output_dir}/ 下无分句 WAV")
-                return
-
-            if len(sentences) != len(wavs):
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.warning(
-                    self, "错误",
-                    f"句子数（{len(sentences)}）与音频数（{len(wavs)}）不一致"
-                )
-                return
-
-            pauses = self._project.pauses if self._project else []
-            if pauses and len(pauses) == len(sentences):
-                entries = generate_srt_from_sentences_with_pauses(
-                    sentences, wavs, pauses
-                )
-            else:
-                entries = generate_srt_from_sentences("", sentences, wavs)
-
-            self.load_entries(entries)
+        if not sentences:
             from PySide6.QtWidgets import QMessageBox
-            QMessageBox.information(self, "完成", f"已重新生成 {len(entries)} 条字幕")
-        except Exception as e:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "错误", str(e))
+            QMessageBox.warning(self, "错误", "没有可用句子，请先拆分文稿")
+            return
+
+        pauses = self._project.pauses if self._project else None
+        self._start_regen_worker(sentences, output_dir, pauses, silent=False)
 
     def _export_srt(self):
         default_path = os.path.join(self._output_dir(), "full_dub.srt")

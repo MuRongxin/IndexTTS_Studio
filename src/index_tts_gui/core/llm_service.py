@@ -49,18 +49,22 @@ DEFAULT_SPLIT_PROMPT = """请将以下文稿按语义和朗读节奏拆分成适
 文稿：
 {text}"""
 
-DEFAULT_PAUSE_PROMPT = """你是一位配音导演。以下文稿已被拆分成若干短句，每句将单独合成音频，最后需要拼接成完整音频。
-请你为每一句之后建议一个停顿时长（秒），让整段配音听起来自然、有节奏感。
+DEFAULT_PAUSE_PROMPT = """你是一位配音导演。以下是已拆分的配音句子，每句附有序号。
+
+请为每句**之后**建议一个停顿时长（秒），让整段配音听起来自然、有节奏感。
+
+输出格式：JSON 数组，每个元素含 i（句子序号）和 p（停顿秒数）：
+[{"i": 0, "p": 0.35}, {"i": 1, "p": 0.50}, ...]
 
 要求：
-1. 仅输出一个 JSON 数组，数组长度必须等于句子数量；
-2. 每个元素是对应句子**之后**的停顿秒数，最后一句必须为 0；
-3. 数值范围 0.0 ~ 2.0，建议精确到 0.05；
-4. 根据语义完整性、标点符号、情感转折决定停顿，不要每句都相同；
-5. 不要输出任何解释、说明或 markdown 代码块。
+1. 仅输出 JSON 数组，不要任何解释或 markdown；
+2. 序号 i 与下面给出的序号一一对应；
+3. 最后一句的停顿 p 必须为 0；
+4. 数值范围 0.0 ~ 2.0，建议精确到 0.05；
+5. 根据语义完整性、标点符号、情感转折决定停顿，不要每句都相同。
 
 句子列表：
-{sentences_json}
+{sentences_indexed}
 
 请直接输出 JSON 数组："""
 
@@ -265,26 +269,37 @@ class LLMService:
 
     # ── 停顿建议 ──
 
-    PAUSE_CHUNK_SIZE = 50  # 单次 LLM 最多处理句子数
+    PAUSE_CHUNK_SIZE = 42  # 单次 LLM 最多处理句子数
 
-    def advise_pauses(self, sentences: list[str]) -> list[float]:
+    def advise_pauses(
+        self, sentences: list[str],
+        on_progress: callable | None = None,
+    ) -> list[float]:
         """用 LLM 为每句音频建议停顿时长。句数多时分块处理。"""
         if not sentences:
             return []
 
         # 短列表直接发送
         if len(sentences) <= self.PAUSE_CHUNK_SIZE:
-            return self._advise_pauses_chunk(sentences)
+            if on_progress:
+                on_progress(1, 1, "询问停顿建议…")
+            return self._advise_pauses_chunk(sentences, start_index=0)
 
         # 长列表分块
+        total_chunks = (len(sentences) + self.PAUSE_CHUNK_SIZE - 1) // self.PAUSE_CHUNK_SIZE
         all_pauses: list[float] = []
         for i in range(0, len(sentences), self.PAUSE_CHUNK_SIZE):
+            chunk_idx = i // self.PAUSE_CHUNK_SIZE + 1
             chunk = sentences[i : i + self.PAUSE_CHUNK_SIZE]
-            logger.info("LLMService.pauses: 处理第 %d 块 (%d 句)",
-                        i // self.PAUSE_CHUNK_SIZE + 1, len(chunk))
-            pauses = self._advise_pauses_chunk(chunk)
+            msg = f"询问停顿建议: 第 {chunk_idx}/{total_chunks} 块 ({len(chunk)} 句)"
+            logger.info("LLMService.pauses: %s", msg)
+            if on_progress:
+                on_progress(chunk_idx, total_chunks, msg)
+
+            pauses = self._advise_pauses_chunk(chunk, start_index=i)
             if all_pauses:
-                # 询问 LLM：上块末句与下块首句之间应该停顿多久
+                if on_progress:
+                    on_progress(chunk_idx, total_chunks, "计算块边界停顿…")
                 boundary = self._advise_boundary_pause(
                     sentences[i - 1], sentences[i]
                 )
@@ -317,26 +332,93 @@ class LLMService:
             logger.warning("LLMService: 无法解析边界停顿，使用默认 0.3s: %s", content[:50])
             return 0.3
 
-    def _advise_pauses_chunk(self, sentences: list[str]) -> list[float]:
-        """对单块句子请求停顿建议。"""
+    def _advise_pauses_chunk(self, sentences: list[str], start_index: int = 0) -> list[float]:
+        """对单块句子请求停顿建议。数量不对时只重试缺失的序号。"""
         prompt_template = self._cfg.get("pause_prompt_template", "") or DEFAULT_PAUSE_PROMPT
-        prompt = prompt_template.format(
-            sentences_json=json.dumps(sentences, ensure_ascii=False, indent=2)
-        )
-        messages = [{"role": "user", "content": prompt}]
-
+        expected = len(sentences)
         client = self._make_client()
-        dynamic_max_tokens = max(1024, min(8192, len(sentences) * 80 + 1024))
 
-        content = client.chat_completion(
-            messages=messages,
-            max_completion_tokens=dynamic_max_tokens,
-            temperature=0.3,
+        # 构建序号化句子列表
+        indexed_lines = "\n".join(
+            f"{start_index + i}: {s}" for i, s in enumerate(sentences)
         )
-        return self._parse_pauses(content, len(sentences))
+        prompt = prompt_template.replace("{sentences_indexed}", indexed_lines)
+        messages: list[dict] = [{"role": "user", "content": prompt}]
+        dynamic_max_tokens = max(1024, min(8192, expected * 80 + 1024))
 
-    def _parse_pauses(self, content: str, expected_count: int) -> list[float]:
+        all_pauses: dict[int, float] = {}
+        missing = set(range(start_index, start_index + expected))
+
+        for attempt in range(3):
+            content = client.chat_completion(
+                messages=messages,
+                max_completion_tokens=dynamic_max_tokens,
+                temperature=0.3,
+            )
+            # 解析已获得的停顿
+            try:
+                parsed = self._parse_pauses_indexed(content, expected, start_index)
+                all_pauses.update(parsed)
+                missing -= set(parsed.keys())
+            except LLMServiceError as e:
+                logger.warning("LLMService.pauses 第 %d 次解析失败: %s", attempt + 1, e)
+                parsed = {}
+
+            if not missing:
+                return [all_pauses[start_index + i] for i in range(expected)]
+
+            if missing:
+                logger.warning(
+                    "LLMService.pauses 第 %d 次仍缺 %d 个序号: %s",
+                    attempt + 1, len(missing), sorted(missing)[:10],
+                )
+            if attempt == 2:
+                # 用标点规则补缺
+                from index_tts_gui.core.merger import _compute_pauses
+                fallback = _compute_pauses(sentences)
+                for i in missing:
+                    local_i = i - start_index
+                    if local_i < len(fallback):
+                        all_pauses[i] = fallback[local_i]
+                logger.warning(
+                    "LLMService.pauses 3 次仍缺 %d 个，用标点规则补足", len(missing)
+                )
+                break
+
+            # 追加纠正消息，只问缺失的句子
+            missing_sentences = {
+                idx: sentences[idx - start_index]
+                for idx in sorted(missing)
+            }
+            messages.append({"role": "assistant", "content": content})
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"还缺少以下句子的停顿建议，请只补充这些：\n"
+                    + "\n".join(f"{i}: {t}" for i, t in sorted(missing_sentences.items()))
+                    + f"\n\n请输出 JSON 数组，每项含 i 和 p。"
+                ),
+            })
+            dynamic_max_tokens = max(256, len(missing) * 40 + 128)
+
+        return [all_pauses.get(start_index + i, 0.3) for i in range(expected)]
+
+    def _parse_pauses_indexed(
+        self, content: str, expected_count: int, start_index: int
+    ) -> dict[int, float]:
+        """解析 [{"i": 0, "p": 0.35}, ...] 格式的停顿建议，返回 {序号: 停顿值}。"""
         content = content.strip()
+        # 去除 LLM 多余追加的标点/句号和尾部非 JSON 字符
+        content = re.sub(r'[。！？，、；：\s]+$', '', content)
+        # 如果末尾是 ,] 这种残缺格式，补齐 ]
+        if content.endswith(','):
+            content = content[:-1]
+        if not content.endswith(']'):
+            # 尝试找到最后一个完整的 } 并闭合
+            last_brace = content.rfind('}')
+            if last_brace > 0:
+                content = content[:last_brace + 1] + ']'
+        logger.info("LLMService._parse_pauses_indexed: 处理后内容前200字: %s", content[:200])
         candidates: list[str] = []
 
         # 1. markdown 代码块
@@ -350,34 +432,62 @@ class LLMService:
         # 3. 兜底
         candidates.append(content)
 
-        pauses = None
-        last_err = None
+        # 解析 [{"i":..., "p":...}] 格式
+        items = None
         for raw in candidates:
             try:
-                pauses = json.loads(raw)
-                if isinstance(pauses, list):
+                items = json.loads(raw)
+                if isinstance(items, list) and all(
+                    isinstance(it, dict) and "i" in it and "p" in it for it in items
+                ):
                     break
-            except json.JSONDecodeError as e:
-                last_err = e
+            except json.JSONDecodeError:
+                pass
+            items = None
 
-        if pauses is None or not isinstance(pauses, list):
-            raise LLMServiceError(f"无法解析停顿建议: {last_err}")
+        if items is None:
+            # 容错：LLM 返回的 JSON 可能被截断，尝试用 raw_decode 解析完整部分
+            for raw in candidates:
+                raw = raw.strip()
+                if not raw.startswith("["):
+                    continue
+                try:
+                    decoder = json.JSONDecoder()
+                    items, _ = decoder.raw_decode(raw)
+                    if isinstance(items, list):
+                        break
+                except json.JSONDecodeError:
+                    # 最后手段：在最后一个完整 "}]" 处截断
+                    last_complete = raw.rfind('"}')
+                    if last_complete > 0:
+                        try:
+                            items = json.loads(raw[:last_complete + 2] + "]")
+                            if isinstance(items, list):
+                                break
+                        except json.JSONDecodeError:
+                            pass
 
-        if len(pauses) != expected_count:
-            raise LLMServiceError(
-                f"停顿数量不匹配：期望 {expected_count}，实际 {len(pauses)}"
-            )
+        if items is None or not isinstance(items, list):
+            raise LLMServiceError(f"无法解析停顿建议: {content[:200]}")
 
-        result = []
-        for i, p in enumerate(pauses):
+        result: dict[int, float] = {}
+        for item in items:
             try:
-                val = float(p)
-            except (TypeError, ValueError):
-                raise LLMServiceError(f"第 {i+1} 个停顿值不是数字: {p}")
-            result.append(round(max(0.0, min(2.0, val)), 2))
+                idx = int(item["i"])
+                val = float(item["p"])
+                if start_index <= idx < start_index + expected_count:
+                    result[idx] = round(max(0.0, min(2.0, val)), 2)
+            except (TypeError, ValueError, KeyError):
+                continue
 
-        if result:
-            result[-1] = 0.0
+        if not result:
+            raise LLMServiceError(f"停顿建议中没有有效数据: {content[:200]}")
+
+        # 最后一句强制为 0
+        last_idx = start_index + expected_count - 1
+        if last_idx in result:
+            result[last_idx] = 0.0
+
         return result
 
 
