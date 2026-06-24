@@ -38,7 +38,7 @@ class SubtitleStyle:
     """
 
     font_name: str = "Microsoft YaHei"
-    font_size: int = 25
+    font_size: int = 90
     primary_color: str = "#FFFFFF"
     outline_color: str = "#000000"
     back_color: str = "#00000000"

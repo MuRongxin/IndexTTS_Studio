@@ -15,7 +15,7 @@ class SynthesisWorker(QThread):
 
     progress = Signal(int, int, str)     # current, total, sentence_text
     sentence_done = Signal(int, str)     # index, wav_path
-    finished = Signal()                  # 全部完成
+    finished = Signal(list)              # wav_map: list[dict]
     error = Signal(str)                  # 错误信息
     log = Signal(str)                    # 日志
 
@@ -27,6 +27,7 @@ class SynthesisWorker(QThread):
         self._output_dir = output_dir
         self._client = client
         self._canceled = False
+        self._wav_map: list[dict] = []
 
         os.makedirs(self._output_dir, exist_ok=True)
 
@@ -67,6 +68,11 @@ class SynthesisWorker(QThread):
                     os.path.basename(wav_path), len(audio_bytes)
                 )
                 self.sentence_done.emit(i, wav_path)
+                self._wav_map.append({
+                    "index": i - 1,  # 0-based
+                    "text": sentence,
+                    "wav": os.path.basename(wav_path),
+                })
                 self.log.emit(f"  ✓ {os.path.basename(wav_path)} ({len(audio_bytes)} bytes)")
 
             except Exception as e:
@@ -78,4 +84,5 @@ class SynthesisWorker(QThread):
         if not self._canceled:
             logger.info("合成完成: 共 %d 句", total)
             self.log.emit(f"合成完成！共 {total} 句")
-        self.finished.emit()
+            self.log.emit(f"📝 写入 WAV 映射: {len(self._wav_map)} 条")
+        self.finished.emit(self._wav_map)

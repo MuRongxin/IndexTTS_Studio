@@ -167,6 +167,64 @@ class SynthesisPanel(QWidget):
         has_sentences = bool(self._sentences)
         self._btn_merge.setEnabled(has_wavs and has_sentences)
 
+    def _diff_sentences(self) -> tuple[list[int], list[int], list[int]]:
+        """对比当前句子与 wav_map，返回 (未变, 已变, 新增) 的 0-based 索引列表。"""
+        unchanged = []
+        changed = []
+        new_sentences = []
+        wav_map = self._project.wav_map
+
+        if not wav_map:
+            # 无历史映射，全部算新增
+            new_sentences = list(range(len(self._sentences)))
+            self._log_msg(f"🔍 WAV 映射为空，{len(new_sentences)} 句需重新合成")
+            return unchanged, changed, new_sentences
+
+        for i, sent in enumerate(self._sentences):
+            match = None
+            for entry in wav_map:
+                if entry["index"] == i and entry["text"] == sent:
+                    match = entry
+                    break
+            if match:
+                # 检查对应 WAV 是否存在
+                wav_path = os.path.join(self._output_dir, match["wav"])
+                if os.path.exists(wav_path):
+                    unchanged.append(i)
+                else:
+                    changed.append(i)
+            elif any(e["index"] == i for e in wav_map):
+                changed.append(i)
+            else:
+                new_sentences.append(i)
+
+        # 找出已删除的句子（wav_map 中有但 sentences 中没有的）
+        deleted = [
+            e for e in wav_map
+            if e["index"] >= len(self._sentences)
+            or self._sentences[e["index"]] != e["text"]
+        ]
+
+        # 输出 diff 日志
+        if unchanged:
+            self._log_msg(f"✅ {len(unchanged)} 句未变，跳过合成")
+        if changed:
+            self._log_msg(f"🔄 {len(changed)} 句文本已变，需重新合成: {changed[:10]}{'...' if len(changed)>10 else ''}")
+        if new_sentences:
+            self._log_msg(f"➕ {len(new_sentences)} 句新增，需合成")
+        if deleted:
+            self._log_msg(f"🗑 {len(deleted)} 句已从文稿移除，对应 WAV 可清理")
+            for e in deleted:
+                old_wav = os.path.join(self._output_dir, e["wav"])
+                if os.path.exists(old_wav):
+                    try:
+                        os.remove(old_wav)
+                    except Exception:
+                        pass
+            self._log_msg(f"🗑 已清理 {len(deleted)} 个过期 WAV")
+
+        return unchanged, changed, new_sentences
+
     def _start(self):
         if not self._sentences:
             self._log_msg("⚠ 请先在文稿面板拆分句子")
@@ -174,6 +232,9 @@ class SynthesisPanel(QWidget):
         if not self._audio_name:
             self._log_msg("⚠ 请先在音色面板上传参考音频")
             return
+
+        # 对比句子变化
+        self._diff_sentences()
 
         self._was_canceled = False
         self._progress.setValue(0)
@@ -206,7 +267,7 @@ class SynthesisPanel(QWidget):
     def _on_sentence_done(self, index, path):
         pass
 
-    def _on_finished(self):
+    def _on_finished(self, wav_map=None):
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
 
@@ -214,6 +275,12 @@ class SynthesisPanel(QWidget):
             self._status_label.setText("已停止")
             self._log_msg("━━━━━━━━━━ 已取消 ━━━━━━━━━━")
             return
+
+        # 保存 WAV 映射
+        if wav_map:
+            self._project.wav_map = wav_map
+            self._project.save()
+            self._log_msg(f"📝 WAV 映射已保存: {len(wav_map)} 条")
 
         self._progress.setValue(self._progress.maximum())
         self._status_label.setText("合成完成 ✓")

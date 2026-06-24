@@ -182,7 +182,7 @@ class SubtitlePanel(QWidget):
         toolbar.addWidget(QLabel("字号:"))
         self._size_spin = QSpinBox()
         self._size_spin.setRange(8, 200)
-        self._size_spin.setValue(25)
+        self._size_spin.setValue(90)
         toolbar.addWidget(self._size_spin)
 
         self._color_btn = QPushButton()
