@@ -56,7 +56,7 @@ class TimelineCanvas(QWidget):
 
     HEADER_HEIGHT = 30
     WAVEFORM_HEIGHT = 200            # 频谱图高度
-    TRACK_Y_OFFSET = 2*(HEADER_HEIGHT + WAVEFORM_HEIGHT)/3  # 紧贴波形下边缘
+    TRACK_Y_OFFSET = 4*(HEADER_HEIGHT + WAVEFORM_HEIGHT)/5  # 紧贴波形下边缘
     TRACK_HEIGHT = 55                # 字幕块区域高度
     BLOCK_PADDING = 4
     HANDLE_WIDTH = 5
@@ -65,8 +65,8 @@ class TimelineCanvas(QWidget):
     COLOR_HEADER = QColor(51, 51, 51)
     COLOR_TICK = QColor(85, 85, 85)
     COLOR_TICK_TEXT = QColor(170, 170, 170)
-    COLOR_WAVEFORM = QColor(76, 175, 80)
-    COLOR_WAVEFORM_ALPHA = 153
+    COLOR_WAVEFORM = QColor(82, 165, 235)
+    COLOR_WAVEFORM_ALPHA = 150
     COLOR_PLAYHEAD = QColor(255, 50, 50)
     COLOR_SELECTION = QColor(255, 215, 0)
     COLOR_BLOCK_TEXT = QColor(255, 255, 255)
@@ -123,7 +123,7 @@ class TimelineCanvas(QWidget):
         self._razor_preview_pos: Optional[QPoint] = None
         self._razor_preview_text: tuple[str, str] = ("", "")
 
-        self._font = QFont("Consolas", 18)
+        self._font = QFont("Consolas", 10)
         self._block_font = QFont("得意黑", 18)
         self._tooltip_font = QFont("文悦新青年体 (须授权)", 20)
 
@@ -320,13 +320,7 @@ class TimelineCanvas(QWidget):
         painter.setPen(center_pen)
         painter.drawLine(0, int(center_y), self.width(), int(center_y))
 
-        # 构建波形路径（上下对称填充）
-        upper_path = QPainterPath()
-        lower_path = QPainterPath()
-        first_x = 0
-        first_upper_y = center_y
-        first_lower_y = center_y
-
+        # 构建波形路径（上半轮廓 → 下半轮廓 → 闭合）
         points_upper = []
         points_lower = []
 
@@ -337,40 +331,24 @@ class TimelineCanvas(QWidget):
             if x + bar_w < 0 or x > self.width():
                 continue
             cx = x + bar_w / 2
-            max_peak = self.waveform_bars[i, 1]  # 正半轴振幅
-            # 只取正峰值（上半部分），负峰值镜像到下半部分
-            upper_y = center_y - abs(max_peak) * half_height
-            lower_y = center_y + abs(max_peak) * half_height
-
-            if not points_upper:
-                first_x = cx
-                first_upper_y = upper_y
-                first_lower_y = lower_y
-
-            points_upper.append((cx, upper_y))
-            points_lower.append((cx, lower_y))
+            min_p = self.waveform_bars[i, 0]
+            max_p = self.waveform_bars[i, 1]
+            points_upper.append((cx, center_y + min_p * half_height))
+            points_lower.append((cx, center_y + max_p * half_height))
 
         if not points_upper:
             return
 
-        # 构建上半部分路径
-        upper_path.moveTo(first_x, center_y)
-        for cx, y in points_upper:
-            upper_path.lineTo(cx, y)
-        upper_path.lineTo(points_upper[-1][0], center_y)
-        upper_path.closeSubpath()
-
-        # 构建下半部分路径
-        lower_path.moveTo(first_x, center_y)
-        for cx, y in points_lower:
-            lower_path.lineTo(cx, y)
-        lower_path.lineTo(points_lower[-1][0], center_y)
-        lower_path.closeSubpath()
-
-        # 合并上下路径
+        # 闭合路径：上轮廓从左到右 → 下轮廓从右到左
         full_path = QPainterPath()
-        full_path.addPath(upper_path)
-        full_path.addPath(lower_path)
+        full_path.moveTo(points_upper[0][0], center_y)
+        for cx, y in points_upper:
+            full_path.lineTo(cx, y)
+        # 过渡到下半轮廓
+        full_path.lineTo(points_upper[-1][0], center_y)
+        for cx, y in reversed(points_lower):
+            full_path.lineTo(cx, y)
+        full_path.closeSubpath()
 
         # 渐变色填充
         from PySide6.QtGui import QLinearGradient
@@ -395,22 +373,16 @@ class TimelineCanvas(QWidget):
         painter.setBrush(QBrush(gradient))
         painter.drawPath(full_path)
 
-        # 峰值描边线
-        peak_pen = QPen(QColor(
+        # 波峰描边线
+        outline_pen = QPen(QColor(
             self.COLOR_WAVEFORM.red(),
             self.COLOR_WAVEFORM.green(),
             self.COLOR_WAVEFORM.blue(),
             255,
         ), 1)
-        painter.setPen(peak_pen)
+        painter.setPen(outline_pen)
         painter.setBrush(Qt.NoBrush)
-
-        for cx, y in points_upper:
-            if cx >= 0 and cx <= self.width():
-                painter.drawPoint(int(cx), int(y))
-        for cx, y in points_lower:
-            if cx >= 0 and cx <= self.width():
-                painter.drawPoint(int(cx), int(y))
+        painter.drawPath(full_path)
 
     def _draw_subtitle_blocks(self, painter: QPainter):
         if self.subtitle_track is None:
