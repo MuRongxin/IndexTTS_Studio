@@ -54,7 +54,7 @@ class TimelineCanvas(QWidget):
     subtitle_deleted = Signal(list)      # 删除字幕 index 列表
     razor_split = Signal(int, float)     # 剃刀切分（index, split_time）
 
-    HEADER_HEIGHT = 30
+    HEADER_HEIGHT = 43
     WAVEFORM_HEIGHT = 200            # 频谱图高度
     TRACK_Y_OFFSET = 4*(HEADER_HEIGHT + WAVEFORM_HEIGHT)/5  # 紧贴波形下边缘
     TRACK_HEIGHT = 55                # 字幕块区域高度
@@ -123,7 +123,7 @@ class TimelineCanvas(QWidget):
         self._razor_preview_pos: Optional[QPoint] = None
         self._razor_preview_text: tuple[str, str] = ("", "")
 
-        self._font = QFont("Consolas", 10)
+        self._font = QFont("Consolas", 13)
         self._block_font = QFont("得意黑", 18)
         self._tooltip_font = QFont("文悦新青年体 (须授权)", 20)
 
@@ -238,7 +238,7 @@ class TimelineCanvas(QWidget):
                     label = self._format_time(t, self.zoom >= 100)
                     text_rect = fm.boundingRect(label)
                     label_x = int(x) - text_rect.width() // 2
-                    label_y = self.HEADER_HEIGHT - tick_height - 2 - text_height
+                    label_y = self.HEADER_HEIGHT - tick_height - text_height
                     painter.setPen(self.COLOR_TICK_TEXT)
                     painter.drawText(
                         label_x, label_y, text_rect.width(), text_height,
@@ -482,7 +482,7 @@ class TimelineCanvas(QWidget):
         pen = QPen(ph_color)
         pen.setWidth(2)
         painter.setPen(pen)
-        painter.drawLine(x, 0, x, self.height())
+        painter.drawLine(x, self.HEADER_HEIGHT, x, self.height())
 
         triangle_size = 8
         triangle = QPainterPath()
