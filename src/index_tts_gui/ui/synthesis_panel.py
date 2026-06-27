@@ -40,11 +40,14 @@ class SynthesisPanel(QWidget):
 
         self._voice_panel = VoicePanel(self._project, self._client)
         self._voice_panel.audio_uploaded.connect(self.set_audio_name)
+        self._voice_panel.segment_regenerate.connect(self._on_segment_regenerate_request)
+        self._voice_panel.segment_preview.connect(self._preview_wav)
 
         self._setup_ui()
         # 从工程恢复状态（兜底：sentences_ready 信号可能在构造时尚未连接）
         if self._project.sentences:
             self.set_sentences(self._project.sentences)
+        self._refresh_segment_list()
         self._refresh_merge_button()
 
     def _setup_ui(self):
@@ -53,7 +56,7 @@ class SynthesisPanel(QWidget):
         layout.setSpacing(12)
 
         # ── 音色选择区（嵌入 VoicePanel）──
-        layout.addWidget(self._voice_panel)
+        layout.addWidget(self._voice_panel, 1)
 
         # 设置区
         gb = QGroupBox("合成设置")
@@ -134,6 +137,36 @@ class SynthesisPanel(QWidget):
         ctrl.addWidget(self._btn_clear_output)
 
         ctrl.addStretch()
+
+        self._btn_preview_single = QPushButton("▶ 预览")
+        self._btn_preview_single.setVisible(False)
+        self._btn_preview_single.setToolTip("预览选中的合成片段")
+        self._btn_preview_single.setStyleSheet("""
+            QPushButton {
+                background: #2196f3; color: white;
+                padding: 10px 24px; border-radius: 6px;
+                font-size: 14px; font-weight: bold;
+            }
+            QPushButton:hover { background: #1976d2; }
+        """)
+        self._btn_preview_single.clicked.connect(self._on_preview_single_clicked)
+        ctrl.addWidget(self._btn_preview_single)
+
+        self._btn_regen_single = QPushButton("🔄 重新生成该句")
+        self._btn_regen_single.setVisible(False)
+        self._btn_regen_single.setToolTip("重新合成右侧列表中选中的句子")
+        self._btn_regen_single.setStyleSheet("""
+            QPushButton {
+                background: #ff9800; color: white;
+                padding: 10px 24px; border-radius: 6px;
+                font-size: 14px; font-weight: bold;
+            }
+            QPushButton:hover { background: #f57c00; }
+            QPushButton:disabled { background: #ccc; }
+        """)
+        self._btn_regen_single.clicked.connect(self._on_regen_single_clicked)
+        ctrl.addWidget(self._btn_regen_single)
+
         layout.addLayout(ctrl)
 
         # 日志
@@ -144,6 +177,7 @@ class SynthesisPanel(QWidget):
         self._log = QPlainTextEdit()
         self._log.setReadOnly(True)
         self._log.setMaximumBlockCount(500)
+        self._log.setMaximumHeight(120)
         self._log.setStyleSheet("background: #1e1e1e; color: #d4d4d4; font-family: monospace;")
         layout.addWidget(self._log)
 
@@ -236,6 +270,7 @@ class SynthesisPanel(QWidget):
         # 对比句子变化
         self._diff_sentences()
 
+        self._voice_panel.clear_segments()
         self._was_canceled = False
         self._progress.setValue(0)
         self._btn_start.setEnabled(False)
@@ -265,7 +300,8 @@ class SynthesisPanel(QWidget):
         self._status_label.setText(f"合成中 [{current}/{total}]: {text[:40]}...")
 
     def _on_sentence_done(self, index, path):
-        pass
+        filename = os.path.basename(path) if os.path.exists(path) else f"sentence_{index:02d}.wav"
+        self._voice_panel.add_segment(index, filename)
 
     def _on_finished(self, wav_map=None):
         self._btn_start.setEnabled(True)
@@ -287,6 +323,66 @@ class SynthesisPanel(QWidget):
         self._log_msg("━━━━━━━━━━ 完成 ━━━━━━━━━━")
         self._btn_merge.setEnabled(True)
         self.synthesis_done.emit(self._output_dir)
+
+    def _on_segment_regenerate_request(self, index: int):
+        """右侧片段被选中/双击，显示/隐藏按钮。"""
+        self._regen_index = index
+        visible = index is not None and index >= 0
+        self._btn_preview_single.setVisible(visible)
+        self._btn_regen_single.setVisible(visible)
+
+    def _on_regen_single_clicked(self):
+        """点击「重新生成该句」按钮。"""
+        if hasattr(self, '_regen_index') and self._regen_index >= 0:
+            self._regenerate_single(self._regen_index)
+
+    def _preview_wav(self, wav_path: str):
+        """预览合成片段 WAV。"""
+        self._voice_panel.preview_segment(wav_path)
+
+    def _on_preview_single_clicked(self):
+        """点击「预览」按钮，播放选中的合成片段。"""
+        if not hasattr(self, '_regen_index') or self._regen_index < 0:
+            return
+        from index_tts_gui.core.merger import collect_sentence_wavs
+        wavs = collect_sentence_wavs(self._output_dir)
+        idx = self._regen_index
+        for wav in wavs:
+            name = os.path.basename(wav)
+            if name.startswith(f"sentence_{idx:02d}_"):
+                self._voice_panel.preview_segment(wav)
+                return
+        self._log_msg(f"⚠ 未找到第 {idx+1} 句的音频文件")
+
+    def _regenerate_single(self, index: int):
+        """重新合成单句（后台线程）。"""
+        if index < 0 or index >= len(self._sentences):
+            return
+        from PySide6.QtCore import QThread
+        from index_tts_gui.core.merger import sanitize_for_filename
+
+        sentence = self._sentences[index]
+        audio_name = self._audio_name
+        output_dir = self._output_dir
+        client = self._client
+        log_msg = self._log_msg
+
+        class _SingleSynthThread(QThread):
+            def run(self):
+                try:
+                    audio_bytes = client.synthesize(sentence, audio_name)
+                    text_part = sanitize_for_filename(sentence)
+                    wav_path = os.path.join(
+                        output_dir, f"sentence_{index:02d}_{text_part}.wav"
+                    )
+                    with open(wav_path, "wb") as f:
+                        f.write(audio_bytes)
+                    log_msg(f"🔄 重新合成: 第 {index+1} 句 → {os.path.basename(wav_path)}")
+                except Exception as e:
+                    log_msg(f"✗ 重新合成第 {index+1} 句失败: {e}")
+
+        self._single_thread = _SingleSynthThread()
+        self._single_thread.start()
 
     def _log_msg(self, msg: str):
         self._log.appendPlainText(msg)
@@ -313,6 +409,7 @@ class SynthesisPanel(QWidget):
         self._log_msg(f"🗑 已清空输出目录，删除 {removed} 个文件")
         self._project.pauses = []
         self._project.save()
+        self._voice_panel.clear_segments()
         self._refresh_merge_button()
 
     def _merge_full_audio(self):
@@ -371,7 +468,23 @@ class SynthesisPanel(QWidget):
         self._voice_panel.set_project(project)
         if project.sentences:
             self.set_sentences(project.sentences)
+        self._refresh_segment_list()
         self._refresh_merge_button()
+
+    def _refresh_segment_list(self):
+        """扫描输出目录，将已有 WAV 文件显示在右侧片段列表。"""
+        self._voice_panel.clear_segments()
+        if not os.path.isdir(self._output_dir):
+            return
+        from index_tts_gui.core.merger import parse_sentence_wav_name
+        wavs = sorted(
+            f for f in os.listdir(self._output_dir)
+            if f.startswith("sentence_") and f.endswith(".wav")
+        )
+        for f in wavs:
+            parsed = parse_sentence_wav_name(f)
+            idx = parsed[0] if parsed else 0
+            self._voice_panel.add_segment(idx, f)
 
     def reset_for_new_project(self):
         """新建工程时清空面板状态。"""

@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QLabel, QFileDialog, QFrame, QMessageBox,
     QListWidget, QListWidgetItem, QAbstractItemView,
 )
-from PySide6.QtCore import Qt, Signal, QUrl
+from PySide6.QtCore import Qt, QSize, Signal, QUrl
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 
@@ -14,10 +14,51 @@ from index_tts_gui.core.project import Project
 from index_tts_gui.ui.voice_upload_worker import VoiceUploadWorker
 
 
+class _AudioListItem(QWidget):
+    """参考音频列表项：文件名 + 试听 + 上传 + 移除。"""
+
+    play_clicked = Signal(str)   # path
+    upload_clicked = Signal(str) # path
+    remove_clicked = Signal(str) # path
+
+    def __init__(self, path: str, name: str, parent=None):
+        super().__init__(parent)
+        self._path = path
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10, 8, 10, 8)
+        row.setSpacing(8)
+
+        label = QLabel(name)
+        label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        row.addWidget(label, 1)
+
+        btn_play = QPushButton("▶")
+        btn_play.setFixedSize(40, 40)
+        btn_play.setToolTip("试听")
+        btn_play.setStyleSheet("QPushButton { border: none; background: #e3f2fd; color: #1976d2; font-size: 18px; border-radius: 8px; } QPushButton:hover { background: #bbdefb; }")
+        btn_play.clicked.connect(lambda: self.play_clicked.emit(self._path))
+        row.addWidget(btn_play)
+
+        btn_upload = QPushButton("☁")
+        btn_upload.setFixedSize(40, 40)
+        btn_upload.setToolTip("上传到 API")
+        btn_upload.setStyleSheet("QPushButton { border: none; background: #e8f5e9; color: #2e7d32; font-size: 18px; border-radius: 8px; } QPushButton:hover { background: #c8e6c9; }")
+        btn_upload.clicked.connect(lambda: self.upload_clicked.emit(self._path))
+        row.addWidget(btn_upload)
+
+        btn_remove = QPushButton("✕")
+        btn_remove.setFixedSize(40, 40)
+        btn_remove.setToolTip("移除")
+        btn_remove.setStyleSheet("QPushButton { border: none; background: #ffebee; color: #c62828; font-size: 18px; border-radius: 8px; } QPushButton:hover { background: #ffcdd2; }")
+        btn_remove.clicked.connect(lambda: self.remove_clicked.emit(self._path))
+        row.addWidget(btn_remove)
+
+
 class VoicePanel(QWidget):
     """音色管理：拖放参考音频 + 试听 + 上传"""
 
     audio_uploaded = Signal(str)  # 上传成功后发射音频名
+    segment_regenerate = Signal(int)  # 请求重新合成某句（index）
 
     def __init__(self, project: Project, client: BaseTTSClient | None = None):
         super().__init__()
@@ -36,7 +77,7 @@ class VoicePanel(QWidget):
 
     def _load_default_audio(self):
         """启动时默认加载项目目录下的参考音频。"""
-        default = "作为愚人众的十一执行官.wav"
+        default = os.path.join(os.getcwd(), "作为愚人众的十一执行官.wav")
         if os.path.exists(default):
             self._load_audio(default)
 
@@ -78,48 +119,27 @@ class VoicePanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
 
-        # 拖放区
-        self._drop_frame = QFrame()
-        self._drop_frame.setAcceptDrops(True)
-        self._drop_frame.setFrameStyle(QFrame.StyledPanel | QFrame.Sunken)
-        self._drop_frame.setMinimumHeight(120)
-        self._drop_frame.setStyleSheet("""
-            QFrame {
-                background: #fafafa;
-                border: 2px dashed #bbb;
-                border-radius: 8px;
-            }
-            QFrame:hover {
-                border-color: #2979ff;
-                background: #f0f5ff;
-            }
-        """)
-        self._drop_frame.dragEnterEvent = self._drag_enter
-        self._drop_frame.dropEvent = self._drop_event
+        # 提示标签
+        hint_label = QLabel("📋 参考音频（拖放 WAV 到下方列表）")
+        hint_label.setStyleSheet("font-weight: bold; color: #555;")
+        layout.addWidget(hint_label)
 
-        drop_layout = QVBoxLayout(self._drop_frame)
-        self._drop_label = QLabel("拖放参考音频到这里\n（WAV 格式，3~15 秒最佳）")
-        self._drop_label.setAlignment(Qt.AlignCenter)
-        self._drop_label.setStyleSheet("border: none; color: #888;")
-        drop_layout.addWidget(self._drop_label)
+        # 左右分栏
+        lists_row = QHBoxLayout()
+        lists_row.setSpacing(8)
 
-        layout.addWidget(self._drop_frame)
-
-        # 参考音频列表
-        list_label = QLabel("📋 参考音频列表:")
-        list_label.setStyleSheet("font-weight: bold; margin-top: 8px;")
-        layout.addWidget(list_label)
-
+        # 左半边：参考音频列表（接受拖放）
         self._audio_list_widget = QListWidget()
-        self._audio_list_widget.setMaximumHeight(120)
+        self._audio_list_widget.setAcceptDrops(True)
         self._audio_list_widget.setAlternatingRowColors(True)
         self._audio_list_widget.setSelectionMode(QAbstractItemView.SingleSelection)
         self._audio_list_widget.currentRowChanged.connect(self._on_audio_list_selected)
         self._audio_list_widget.setStyleSheet("""
             QListWidget {
-                border: 1px solid #ddd;
-                border-radius: 4px;
+                border: 2px dashed #bbb;
+                border-radius: 6px;
                 font-size: 13px;
+                background: #fafafa;
             }
             QListWidget::item {
                 padding: 4px 8px;
@@ -129,52 +149,55 @@ class VoicePanel(QWidget):
                 color: white;
             }
         """)
-        layout.addWidget(self._audio_list_widget)
+        self._audio_list_widget.dragEnterEvent = self._drag_enter
+        self._audio_list_widget.dropEvent = self._drop_event
+        lists_row.addWidget(self._audio_list_widget, 1)
 
-        # 列表操作按钮
-        list_btn_row = QHBoxLayout()
-        self._btn_remove_audio = QPushButton("🗑 移除选中")
-        self._btn_remove_audio.setToolTip("从列表中移除选中的参考音频")
-        self._btn_remove_audio.clicked.connect(self._remove_selected_audio)
-        self._btn_remove_audio.setStyleSheet("""
-            QPushButton {
-                background: #757575; color: white;
-                padding: 2px 10px; border-radius: 3px;
+        # 右半边：合成片段列表（由 synthesis_panel 填充）
+        self._segment_list_widget = QListWidget()
+        self._segment_list_widget.setAlternatingRowColors(True)
+        self._segment_list_widget.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._segment_list_widget.itemDoubleClicked.connect(self._on_segment_double_clicked)
+        self._segment_list_widget.itemSelectionChanged.connect(self._on_segment_selection_changed)
+        self._segment_list_widget.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #ddd;
+                border-radius: 6px;
                 font-size: 12px;
+                background: white;
             }
-            QPushButton:hover { background: #d32f2f; }
+            QListWidget::item {
+                padding: 3px 8px;
+            }
+            QListWidget::item:selected {
+                background: #fff3e0;
+                color: #333;
+            }
         """)
-        list_btn_row.addWidget(self._btn_remove_audio)
-        list_btn_row.addStretch()
-        layout.addLayout(list_btn_row)
+        lists_row.addWidget(self._segment_list_widget, 1)
 
-        # 已选文件信息
-        info_layout = QHBoxLayout()
+        layout.addLayout(lists_row)
+
+        # 当前选择信息
+        info_row = QHBoxLayout()
         self._file_label = QLabel("未选择音频")
-        self._file_label.setStyleSheet("font-weight: bold;")
-        info_layout.addWidget(self._file_label)
-        info_layout.addStretch()
-
-        btn_browse = QPushButton("📁 浏览")
-        btn_browse.clicked.connect(self._browse)
-        info_layout.addWidget(btn_browse)
-        layout.addLayout(info_layout)
-
-        # 播放控制
-        ctrl_layout = QHBoxLayout()
-        self._btn_play = QPushButton("▶ 试听")
-        self._btn_play.setEnabled(False)
-        self._btn_play.clicked.connect(self._toggle_play)
-        ctrl_layout.addWidget(self._btn_play)
-
+        self._file_label.setStyleSheet("font-weight: bold; color: #333;")
+        info_row.addWidget(self._file_label, 1)
         self._play_status = QLabel("")
-        ctrl_layout.addWidget(self._play_status)
-        ctrl_layout.addStretch()
+        self._play_status.setStyleSheet("color: #666; font-size: 12px;")
+        info_row.addWidget(self._play_status)
+        layout.addLayout(info_row)
 
-        layout.addLayout(ctrl_layout)
+        # 隐藏的试听按钮（保持兼容，实际试听由列表内联按钮触发）
+        self._btn_play = QPushButton()
+        self._btn_play.hide()
 
-        # 上传区
-        upload_layout = QHBoxLayout()
+        # 上传状态（上传按钮已移至合成面板控制栏）
+        self._upload_status = QLabel("")
+        self._upload_status.setStyleSheet("color: #666; font-size: 12px;")
+        layout.addWidget(self._upload_status)
+
+        # 上传按钮引用（由 synthesis_panel 控制）
         self._btn_upload = QPushButton("☁ 上传到 API")
         self._btn_upload.setEnabled(False)
         self._btn_upload.setStyleSheet("""
@@ -187,14 +210,6 @@ class VoicePanel(QWidget):
             QPushButton:disabled { background: #ccc; }
         """)
         self._btn_upload.clicked.connect(self._upload)
-        upload_layout.addWidget(self._btn_upload)
-
-        self._upload_status = QLabel("")
-        upload_layout.addWidget(self._upload_status)
-        upload_layout.addStretch()
-        layout.addLayout(upload_layout)
-
-        layout.addStretch()
 
         # 播放器事件
         self._player.playbackStateChanged.connect(self._on_playback_changed)
@@ -240,7 +255,6 @@ class VoicePanel(QWidget):
         # 去重：检查路径
         for entry in self._project.audio_list:
             if entry.get("path") == path:
-                # 已存在，选中它
                 for i in range(self._audio_list_widget.count()):
                     if self._audio_list_widget.item(i).data(Qt.UserRole) == path:
                         self._audio_list_widget.setCurrentRow(i)
@@ -248,11 +262,7 @@ class VoicePanel(QWidget):
         # 添加新条目
         self._project.audio_list.append({"path": path, "name": name})
         self._project.save()
-
-        item = QListWidgetItem(f"🎵 {name}")
-        item.setData(Qt.UserRole, path)
-        item.setToolTip(path)
-        self._audio_list_widget.addItem(item)
+        self._insert_audio_list_item(path, name)
         self._audio_list_widget.setCurrentRow(self._audio_list_widget.count() - 1)
 
     def _on_audio_list_selected(self, row: int):
@@ -321,14 +331,79 @@ class VoicePanel(QWidget):
             name = entry.get("name", os.path.basename(path))
             if not os.path.exists(path):
                 continue
-            item = QListWidgetItem(f"🎵 {name}")
-            item.setData(Qt.UserRole, path)
-            item.setToolTip(path)
-            self._audio_list_widget.addItem(item)
-            # 选中当前使用的音频
-            if path == self._audio_path:
-                self._audio_list_widget.setCurrentItem(item)
+            self._insert_audio_list_item(path, name)
         self._audio_list_widget.blockSignals(False)
+
+    def _insert_audio_list_item(self, path: str, name: str):
+        """插入一个带内联按钮的列表项。"""
+        widget = _AudioListItem(path, name)
+        widget.play_clicked.connect(self._on_item_play)
+        widget.upload_clicked.connect(self._on_item_upload)
+        widget.remove_clicked.connect(self._on_item_remove)
+
+        item = QListWidgetItem()
+        item.setData(Qt.UserRole, path)
+        item.setSizeHint(QSize(widget.sizeHint().width(), 56))
+        self._audio_list_widget.addItem(item)
+        self._audio_list_widget.setItemWidget(item, widget)
+
+        if path == self._audio_path:
+            self._audio_list_widget.setCurrentItem(item)
+
+    def _on_item_play(self, path: str):
+        """列表项试听按钮：加载并播放。"""
+        if path == self._audio_path:
+            self._toggle_play()
+        else:
+            self._load_audio_from_list(path)
+            self._toggle_play()
+
+    def _on_item_upload(self, path: str):
+        """列表项上传按钮：切换到该音频并上传。"""
+        if path != self._audio_path:
+            self._load_audio_from_list(path)
+        self._upload()
+
+    def _on_item_remove(self, path: str):
+        """列表项移除按钮。"""
+        self._remove_audio_path(path)
+
+    def add_segment(self, index: int, filename: str):
+        """合成完成一句后追加到右侧片段列表。"""
+        item = QListWidgetItem(f"📄 {filename}")
+        item.setData(Qt.UserRole, index)  # 存储句子索引
+        item.setToolTip(f"第 {index} 句: {filename}\n双击预览，选中可重新生成")
+        self._segment_list_widget.addItem(item)
+        self._segment_list_widget.scrollToBottom()
+
+    def _on_segment_selection_changed(self):
+        """片段选中变化时，通知外部更新按钮状态。"""
+        item = self._segment_list_widget.currentItem()
+        if item:
+            self.segment_regenerate.emit(item.data(Qt.UserRole))
+
+    segment_preview = Signal(str)  # 请求预览某句（wav_path）
+
+    def _on_segment_double_clicked(self, item: QListWidgetItem):
+        """双击合成片段：预览该句音频。"""
+        index = item.data(Qt.UserRole)
+        if index is None or not self._project:
+            return
+        output_dir = self._project.output_dir
+        for f in os.listdir(output_dir):
+            if f.startswith(f"sentence_{index:02d}_") and f.endswith(".wav"):
+                self.segment_preview.emit(os.path.join(output_dir, f))
+                return
+
+    def preview_segment(self, wav_path: str):
+        """预览合成片段音频。"""
+        if os.path.exists(wav_path):
+            self._player.setSource(QUrl.fromLocalFile(wav_path))
+            self._player.play()
+
+    def clear_segments(self):
+        """清空合成片段列表。"""
+        self._segment_list_widget.clear()
 
     # ── 播放控制 ──
 
@@ -400,6 +475,7 @@ class VoicePanel(QWidget):
         self._player.stop()
         self._player.setSource(QUrl())
         self._audio_list_widget.clear()
+        self._segment_list_widget.clear()
 
     def get_audio_name(self) -> str:
         return self._audio_name
