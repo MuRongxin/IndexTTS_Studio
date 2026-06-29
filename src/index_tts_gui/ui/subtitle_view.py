@@ -259,10 +259,6 @@ class SubtitlePanel(QWidget):
 
         btn_row.addStretch()
 
-        self._btn_regenerate = QPushButton("🔄 重新生成")
-        self._btn_regenerate.setToolTip("从 output_tts/ 分句 WAV 重新分析生成")
-        btn_row.addWidget(self._btn_regenerate)
-
         self._btn_export = QPushButton("📤 导出 SRT")
         self._btn_export.setEnabled(False)
         self._btn_export.setStyleSheet("""
@@ -321,7 +317,6 @@ class SubtitlePanel(QWidget):
         self._btn_split.clicked.connect(self._split_selected)
         self._btn_merge.clicked.connect(self._merge_selected)
         self._btn_delete.clicked.connect(self._delete_selected)
-        self._btn_regenerate.clicked.connect(self._regenerate)
         self._btn_export.clicked.connect(self._export_srt)
         self._btn_export_ass.clicked.connect(self._export_ass)
 
@@ -408,7 +403,7 @@ class SubtitlePanel(QWidget):
         if len(wavs) != len(self._project.sentences):
             return
         pauses = self._project.pauses if self._project.pauses else None
-        self._start_regen_worker(self._project.sentences, output_dir, pauses, silent=True)
+        self._start_regen_worker(self._project.sentences, output_dir, pauses)
 
     def _load_audio(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1159,9 +1154,9 @@ class SubtitlePanel(QWidget):
 
     def _start_regen_worker(
         self, sentences: list[str], output_dir: str,
-        pauses: list[float] | None = None, silent: bool = False,
+        pauses: list[float] | None = None,
     ):
-        """启动后台字幕生成线程。silent=True 时失败不弹窗。"""
+        """启动后台字幕生成线程（仅作为无保存字幕时的自动兜底）。"""
         if self._regen_worker is not None:
             try:
                 self._regen_worker.finished.disconnect()
@@ -1177,10 +1172,7 @@ class SubtitlePanel(QWidget):
         # 记录启动时的工程，避免结果覆盖新工程
         self._regen_worker.setProperty("project_dir", self._project.project_dir if self._project else "")
         self._regen_worker.finished.connect(self._on_regen_finished)
-        if silent:
-            self._regen_worker.error.connect(lambda msg: None)  # 静默
-        else:
-            self._regen_worker.error.connect(self._on_regen_error)
+        self._regen_worker.error.connect(lambda msg: logger.warning("自动重建字幕失败: %s", msg))
         self._regen_worker.finished.connect(self._regen_worker.deleteLater)
         self._regen_worker.start()
 
@@ -1195,31 +1187,6 @@ class SubtitlePanel(QWidget):
             return
         self.load_entries(entries, auto_load_audio=False)
         self._save_subtitles_to_project()
-
-    def _on_regen_error(self, msg: str):
-        from PySide6.QtWidgets import QMessageBox
-        QMessageBox.warning(self, "错误", msg)
-
-    def _regenerate(self):
-        """从当前工程输出目录后台重新生成字幕。"""
-        output_dir = self._output_dir()
-        sentences: list[str] = []
-        if self._project:
-            sentences = list(self._project.sentences)
-
-        if not sentences and self._get_manuscript_text is not None:
-            text = self._get_manuscript_text()
-            if text:
-                from index_tts_gui.core.subtitler import _split_manuscript
-                sentences = _split_manuscript(text)
-
-        if not sentences:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "错误", "没有可用句子，请先拆分文稿")
-            return
-
-        pauses = self._project.pauses if self._project else None
-        self._start_regen_worker(sentences, output_dir, pauses, silent=False)
 
     def _export_srt(self):
         default_path = os.path.join(self._output_dir(), "full_dub.srt")
