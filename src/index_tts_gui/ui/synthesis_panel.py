@@ -46,17 +46,17 @@ class SingleSynthesisWorker(QThread):
 
     def run(self):
         try:
-            audio_bytes = self._client.synthesize(self._sentence, self._audio_name)
             text_part = sanitize_for_filename(self._sentence)
             wav_path = os.path.join(
                 self._output_dir, f"sentence_{self._index + 1:02d}_{text_part}.wav"
             )
+            self.log.emit(
+                f"🔄 开始重新合成第 {self._index + 1} 句 → {os.path.basename(wav_path)}"
+            )
+            audio_bytes = self._client.synthesize(self._sentence, self._audio_name)
             with open(wav_path, "wb") as f:
                 f.write(audio_bytes)
             self.success.emit(self._index, wav_path)
-            self.log.emit(
-                f"🔄 重新合成: 第 {self._index + 1} 句 → {os.path.basename(wav_path)}"
-            )
         except Exception as e:
             logger.exception("重新合成单句失败: index=%d", self._index)
             self.error.emit(self._index, str(e))
@@ -529,6 +529,8 @@ class SynthesisPanel(QWidget):
         }
         self._project.wav_map = list(existing.values())
         self._project.save()
+        self._log_msg(f"✅ 第 {index + 1} 句重新合成完成: {os.path.basename(wav_path)}")
+        self._refresh_segment_list()
         self._refresh_merge_button()
 
     def _on_single_synth_error(self, index: int, msg: str):
