@@ -205,6 +205,11 @@ class VoicePanel(QWidget):
 
         layout.addLayout(lists_row)
 
+        # 播放状态
+        self._play_status = QLabel("")
+        self._play_status.setStyleSheet("color: #666; font-size: 12px;")
+        layout.addWidget(self._play_status)
+
         # 隐藏的试听按钮（保持兼容，实际试听由列表内联按钮触发）
         self._btn_play = QPushButton()
         self._btn_play.hide()
