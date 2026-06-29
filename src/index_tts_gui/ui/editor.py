@@ -449,6 +449,7 @@ class ManuscriptPanel(QWidget):
             except Exception:
                 pass
             self._worker.deleteLater()
+            self._worker = None
 
         self._worker = SplitWorker(
             text=text,
@@ -458,7 +459,7 @@ class ManuscriptPanel(QWidget):
         )
         self._worker.progress.connect(self._on_split_progress)
         self._worker.finished.connect(self._on_split_finished)
-        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.finished.connect(self._on_worker_lifetime_finished)
         self._worker.start()
 
     def _on_split_progress(self, current: int, total: int, message: str):
@@ -470,6 +471,12 @@ class ManuscriptPanel(QWidget):
         self._status_label.setText(msg)
         self._save_sentences_to_project()
         self.sentences_ready.emit(self._sentences)
+
+    def _on_worker_lifetime_finished(self):
+        """SplitWorker 生命周期结束，安全清理引用。"""
+        if self._worker is not None:
+            self._worker.deleteLater()
+            self._worker = None
 
     def _split_at_cursor(self, cursor_pos: int):
         """在当前编辑行的 cursor_pos 处切分。"""
