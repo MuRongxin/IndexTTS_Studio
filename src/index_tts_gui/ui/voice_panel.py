@@ -659,6 +659,7 @@ class VoicePanel(QWidget):
             except Exception:
                 pass
             self._worker.deleteLater()
+            self._worker = None
 
         self._btn_upload.setEnabled(False)
         self._upload_status.setText("上传中…")

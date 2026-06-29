@@ -428,26 +428,34 @@ class SynthesisPanel(QWidget):
             self._log_msg("━━━━━━━━━━ 已取消 ━━━━━━━━━━")
             return
 
-        # 保存 WAV 映射（合并新结果与已有映射）
-        existing_map = {entry["index"]: entry for entry in self._project.wav_map}
+        # 保存 WAV 映射（只保留当前 sentences 范围内的条目）
+        valid_indices = set(range(len(self._sentences)))
+        existing_map = {
+            entry["index"]: entry
+            for entry in self._project.wav_map
+            if entry["index"] in valid_indices
+        }
         for entry in (wav_map or []):
-            existing_map[entry["index"]] = entry
+            if entry["index"] in valid_indices:
+                existing_map[entry["index"]] = entry
         self._project.wav_map = list(existing_map.values())
         self._project.save()
         self._log_msg(f"📝 WAV 映射已保存: {len(self._project.wav_map)} 条")
 
         self._progress.setValue(self._progress.maximum())
 
-        if len(self._project.wav_map) == len(self._sentences):
+        success_count = len(self._project.wav_map)
+        total_count = len(self._sentences)
+        if success_count == total_count:
             self._status_label.setText("合成完成 ✓")
             self._log_msg("━━━━━━━━━━ 完成 ━━━━━━━━━━")
             self._btn_merge.setEnabled(True)
             self._btn_refresh_pauses.setEnabled(True)
             self.synthesis_done.emit(self._output_dir)
         else:
-            missing = len(self._sentences) - len(self._project.wav_map)
-            self._status_label.setText(f"合成完成，但 {missing} 句失败")
-            self._log_msg(f"⚠ 合成完成，但 {missing} 句失败，请检查日志")
+            failed = total_count - success_count
+            self._status_label.setText(f"合成完成，但 {failed} 句失败")
+            self._log_msg(f"⚠ 合成完成，但 {failed} 句失败，请检查日志")
             self._btn_merge.setEnabled(False)
             self._btn_refresh_pauses.setEnabled(False)
 
@@ -503,12 +511,17 @@ class SynthesisPanel(QWidget):
         self._single_worker.log.connect(self._log_msg)
         self._single_worker.success.connect(self._on_single_synth_success)
         self._single_worker.error.connect(self._on_single_synth_error)
-        self._single_worker.finished.connect(self._single_worker.deleteLater)
+        self._single_worker.finished.connect(self._on_single_worker_finished)
         self._single_worker.start()
 
     def _on_single_synth_success(self, index: int, wav_path: str):
-        # 更新 WAV 映射
-        existing = {e["index"]: e for e in self._project.wav_map}
+        # 更新 WAV 映射，只保留当前 sentences 范围内的条目
+        valid_indices = set(range(len(self._sentences)))
+        existing = {
+            e["index"]: e
+            for e in self._project.wav_map
+            if e["index"] in valid_indices
+        }
         existing[index] = {
             "index": index,
             "text": self._sentences[index],
@@ -520,6 +533,12 @@ class SynthesisPanel(QWidget):
 
     def _on_single_synth_error(self, index: int, msg: str):
         self._log_msg(f"✗ 重新合成第 {index+1} 句失败: {msg}")
+
+    def _on_single_worker_finished(self):
+        """单句合成 worker 生命周期结束，安全清理引用。"""
+        if self._single_worker is not None:
+            self._single_worker.deleteLater()
+            self._single_worker = None
 
     def _log_msg(self, msg: str):
         self._log.appendPlainText(msg)
