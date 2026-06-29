@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Callable, List, Optional
 
@@ -54,6 +55,9 @@ from index_tts_gui.ui.audio_engine import AudioEngine
 from index_tts_gui.ui.audio_load_worker import AudioLoadWorker
 from index_tts_gui.ui.timeline_canvas import TimelineCanvas
 from index_tts_gui.ui.subtitle_regenerate_worker import SubtitleRegenerateWorker
+
+
+logger = logging.getLogger("index_tts")
 
 
 class SubtitlePanel(QWidget):
@@ -370,7 +374,7 @@ class SubtitlePanel(QWidget):
             try:
                 entries = [SubtitleEntry(**item) for item in saved]
                 self.load_entries(entries, auto_load_audio=False)
-                self._log_status.emit(f"已加载保存的字幕: {len(entries)} 条")
+                logger.info("已加载保存的字幕: %d 条", len(entries))
                 return
             except Exception as e:
                 logger.warning("加载保存的字幕失败: %s", e)
@@ -437,7 +441,6 @@ class SubtitlePanel(QWidget):
         self._timeline.set_audio_engine(None)
         self._timeline.set_duration(0)
         self._btn_load_audio.setText(f"📂 {os.path.basename(path)} (加载中…)")
-        self._log_status.emit(f"正在后台加载音频波形: {os.path.basename(path)}…")
         logger.info("正在后台加载音频波形: %s", path)
 
         self._audio_load_worker = AudioLoadWorker(path)
@@ -469,7 +472,6 @@ class SubtitlePanel(QWidget):
         self._btn_play.setEnabled(True)
         self._btn_stop.setEnabled(True)
         self._seek.setEnabled(True)
-        self._log_status.emit(f"音频波形加载完成: {os.path.basename(filepath)} ({duration:.2f}s)")
         logger.info("音频波形加载完成: %s duration=%.2fs", filepath, duration)
 
     def _on_audio_load_failed(self, filepath: str, msg: str):
@@ -483,7 +485,7 @@ class SubtitlePanel(QWidget):
         self._btn_play.setEnabled(False)
         self._btn_stop.setEnabled(False)
         self._seek.setEnabled(False)
-        self._log_status.emit(f"音频加载失败: {os.path.basename(filepath)} - {msg}")
+        logger.error("音频加载失败: %s - %s", os.path.basename(filepath), msg)
 
     def _toggle_play(self):
         if self._player.playbackState() == QMediaPlayer.PlayingState:
