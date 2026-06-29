@@ -367,6 +367,7 @@ class SynthesisPanel(QWidget):
         if self._worker is not None:
             self._disconnect_worker(self._worker)
             self._worker.deleteLater()
+            self._worker = None
 
         self._worker = SynthesisWorker(
             self._sentences, self._audio_name,
@@ -378,6 +379,7 @@ class SynthesisPanel(QWidget):
         self._worker.log.connect(self._log_msg)
         self._worker.error.connect(self._log_msg)
         self._worker.finished.connect(self._on_finished)
+        self._worker.finished.connect(self._on_worker_lifetime_finished)
         self._worker.start()
 
     def _stop(self):
@@ -418,6 +420,12 @@ class SynthesisPanel(QWidget):
     def _on_sentence_done(self, index, path):
         filename = os.path.basename(path) if os.path.exists(path) else f"sentence_{index:02d}.wav"
         self._voice_panel.add_segment(index, filename)
+
+    def _on_worker_lifetime_finished(self):
+        """合成 worker 生命周期结束，安全清理引用。"""
+        if self._worker is not None:
+            self._worker.deleteLater()
+            self._worker = None
 
     def _on_finished(self, wav_map=None):
         self._btn_start.setEnabled(True)

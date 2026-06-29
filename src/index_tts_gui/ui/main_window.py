@@ -382,6 +382,8 @@ class MainWindow(QMainWindow):
 
     def _save_project(self):
         if hasattr(self, "_project"):
+            if hasattr(self, "subtitle_panel") and self.subtitle_panel:
+                self.subtitle_panel.save_subtitles()
             self._project.save()
             self.status_bar.showMessage(f"工程已保存: {self._project.name}")
 

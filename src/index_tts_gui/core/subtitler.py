@@ -7,6 +7,7 @@ import numpy as np
 import librosa
 import soundfile as sf
 
+from index_tts_gui.core.merger import get_wav_duration
 from index_tts_gui.core.subtitle import SubtitleEntry
 
 
@@ -74,7 +75,7 @@ def generate_srt_from_sentences_with_pauses(
                 为 None 时表示句间无停顿
         max_chars: 单条字幕最大字数
     """
-    durations = [_get_duration(p) for p in sentence_wavs]
+    durations = [get_wav_duration(p) for p in sentence_wavs]
     pauses = pauses or [0.0] * len(sentences)
 
     entries: list[SubtitleEntry] = []
@@ -159,27 +160,6 @@ def _split_manuscript(text: str) -> list[str]:
         else:
             merged.append(s)
     return merged
-
-
-def _get_duration(wav_path: str) -> float:
-    import subprocess, json
-    result = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-         "-of", "json", wav_path],
-        capture_output=True, text=True, timeout=30.0,
-    )
-    if result.returncode != 0:
-        err = result.stderr.strip()[:500]
-        raise RuntimeError(f"ffprobe 失败 ({wav_path}): {err}")
-    if not result.stdout.strip():
-        raise RuntimeError(f"ffprobe 返回为空: {wav_path}")
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"ffprobe 输出不是有效 JSON: {wav_path} - {e}") from e
-    if "format" not in data or "duration" not in data["format"]:
-        raise RuntimeError(f"无法获取音频时长: {wav_path}")
-    return float(data["format"]["duration"])
 
 
 PUNCT = '。！？；：，、'
