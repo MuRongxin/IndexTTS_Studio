@@ -536,31 +536,12 @@ class SynthesisPanel(QWidget):
 
         logger.info("开始合并: output_dir=%s sentences=%d", self._output_dir, len(self._sentences))
 
-        if self._merge_worker is not None and self._merge_worker.isRunning():
+        if self._merge_worker is not None:
             self._log_msg("⚠ 正在合并中，请稍候")
             return
 
         self._btn_merge.setEnabled(False)
         self._status_label.setText("正在合并完整音频…")
-
-        if self._merge_worker is not None:
-            try:
-                self._merge_worker.log.disconnect()
-            except Exception:
-                pass
-            try:
-                self._merge_worker.progress.disconnect()
-            except Exception:
-                pass
-            try:
-                self._merge_worker.finished.disconnect()
-            except Exception:
-                pass
-            try:
-                self._merge_worker.error.disconnect()
-            except Exception:
-                pass
-            self._merge_worker.deleteLater()
 
         self._merge_worker = MergeWorker(
             self._sentences, self._output_dir, self._llm_cfg
@@ -569,8 +550,8 @@ class SynthesisPanel(QWidget):
         self._merge_worker.progress.connect(self._on_merge_progress)
         self._merge_worker.finished.connect(self._on_merge_finished)
         self._merge_worker.error.connect(self._on_merge_error)
-        self._merge_worker.finished.connect(self._merge_worker.deleteLater)
-        self._merge_worker.error.connect(self._merge_worker.deleteLater)
+        self._merge_worker.finished.connect(self._on_merge_worker_finished)
+        self._merge_worker.error.connect(self._on_merge_worker_finished)
         self._merge_worker.start()
 
     def _on_merge_progress(self, current: int, total: int, message: str):
@@ -594,6 +575,12 @@ class SynthesisPanel(QWidget):
         self._log_msg(f"✗ 合并失败: {msg}")
         self._status_label.setText("合并失败")
         self._btn_merge.setEnabled(True)
+
+    def _on_merge_worker_finished(self):
+        """worker 生命周期结束，安全清理引用，不访问其成员。"""
+        if self._merge_worker is not None:
+            self._merge_worker.deleteLater()
+            self._merge_worker = None
 
     def set_client(self, client: BaseTTSClient):
         """外部（如 MainWindow）动态切换 API 客户端。"""
