@@ -670,7 +670,7 @@ class VoicePanel(QWidget):
         self._worker.success.connect(self._on_upload_success)
         self._worker.error.connect(self._on_upload_error)
         self._worker.finished.connect(self._on_upload_finished)
-        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.finished.connect(self._on_worker_lifetime_finished)
         self._worker.start()
 
     def _on_upload_success(self, audio_name: str):
@@ -684,6 +684,12 @@ class VoicePanel(QWidget):
 
     def _on_upload_finished(self):
         self._btn_upload.setEnabled(True)
+
+    def _on_worker_lifetime_finished(self):
+        """worker 生命周期结束，安全清理引用，不访问其成员。"""
+        if self._worker is not None:
+            self._worker.deleteLater()
+            self._worker = None
 
     def set_client(self, client: BaseTTSClient):
         """外部（如 MainWindow）动态切换 API 客户端。"""
