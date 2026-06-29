@@ -12,6 +12,7 @@ import re
 from typing import Any
 
 from index_tts_gui.core.llm_client import LLMClient, LLMError
+from index_tts_gui.core.pause_rules import compute_pauses
 
 
 logger = logging.getLogger("index_tts")
@@ -374,8 +375,7 @@ class LLMService:
                 )
             if attempt == 2:
                 # 用标点规则补缺
-                from index_tts_gui.core.merger import _compute_pauses
-                fallback = _compute_pauses(sentences)
+                fallback = compute_pauses(sentences)
                 for i in missing:
                     local_i = i - start_index
                     if local_i < len(fallback):

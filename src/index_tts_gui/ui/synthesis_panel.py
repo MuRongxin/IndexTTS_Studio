@@ -9,15 +9,58 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal
 
+from PySide6.QtCore import QThread, Signal
+
 from index_tts_gui.core.tts_client import BaseTTSClient, IndexTTSClient
 from index_tts_gui.core.project import Project
-from index_tts_gui.core.merger import collect_sentence_wavs
+from index_tts_gui.core.merger import collect_sentence_wavs, sanitize_for_filename
 from index_tts_gui.ui.merge_worker import MergeWorker
 from index_tts_gui.ui.synthesis_worker import SynthesisWorker
 from index_tts_gui.ui.voice_panel import VoicePanel
 
 
 logger = logging.getLogger("index_tts")
+
+
+class SingleSynthesisWorker(QThread):
+    """后台重新合成单句，通过信号与 UI 通信。"""
+
+    success = Signal(int, str)  # 0-based index, wav_path
+    error = Signal(int, str)    # 0-based index, msg
+    log = Signal(str)
+
+    def __init__(
+        self,
+        index: int,
+        sentence: str,
+        audio_name: str,
+        output_dir: str,
+        client: BaseTTSClient,
+    ):
+        super().__init__()
+        self._index = index
+        self._sentence = sentence
+        self._audio_name = audio_name
+        self._output_dir = output_dir
+        self._client = client
+
+    def run(self):
+        try:
+            audio_bytes = self._client.synthesize(self._sentence, self._audio_name)
+            text_part = sanitize_for_filename(self._sentence)
+            wav_path = os.path.join(
+                self._output_dir, f"sentence_{self._index + 1:02d}_{text_part}.wav"
+            )
+            with open(wav_path, "wb") as f:
+                f.write(audio_bytes)
+            self.success.emit(self._index, wav_path)
+            self.log.emit(
+                f"🔄 重新合成: 第 {self._index + 1} 句 → {os.path.basename(wav_path)}"
+            )
+        except Exception as e:
+            logger.exception("重新合成单句失败: index=%d", self._index)
+            self.error.emit(self._index, str(e))
+            self.log.emit(f"✗ 重新合成第 {self._index + 1} 句失败: {e}")
 
 
 class SynthesisPanel(QWidget):
@@ -29,9 +72,16 @@ class SynthesisPanel(QWidget):
     def __init__(self, project: Project, client: BaseTTSClient | None = None):
         super().__init__()
         self._project = project
-        self._client = client or IndexTTSClient()
+        if client is None:
+            try:
+                client = IndexTTSClient()
+            except ValueError as e:
+                logger.warning("未配置 TTS API: %s", e)
+                client = None
+        self._client = client
         self._worker: SynthesisWorker | None = None
         self._merge_worker: MergeWorker | None = None
+        self._single_worker: SingleSynthesisWorker | None = None
         self._sentences: list[str] = []
         self._audio_name: str = project.audio_name
         self._output_dir: str = project.output_dir
@@ -260,6 +310,9 @@ class SynthesisPanel(QWidget):
         return unchanged, changed, new_sentences
 
     def _start(self):
+        if self._client is None:
+            self._log_msg("⚠ 未配置 TTS API，请在左侧「设置」中填写 API URL")
+            return
         if not self._sentences:
             self._log_msg("⚠ 请先在文稿面板拆分句子")
             return
@@ -267,20 +320,41 @@ class SynthesisPanel(QWidget):
             self._log_msg("⚠ 请先在音色面板上传参考音频")
             return
 
-        # 对比句子变化
-        self._diff_sentences()
+        # 对比句子变化，仅合成已变/新增的句子
+        unchanged, changed, new_sentences = self._diff_sentences()
+
+        if not changed and not new_sentences and unchanged:
+            self._log_msg("✅ 所有句子均未变化，无需重新合成")
+            self._refresh_segment_list()
+            self._refresh_merge_button()
+            return
+
+        indices_to_synth = sorted(set(changed + new_sentences))
+        if not indices_to_synth:
+            self._log_msg("⚠ 没有需要合成的句子")
+            return
+
+        if self._worker is not None and self._worker.isRunning():
+            self._log_msg("⚠ 已有合成任务在运行")
+            return
 
         self._voice_panel.clear_segments()
         self._was_canceled = False
         self._progress.setValue(0)
+        self._progress.setMaximum(len(indices_to_synth))
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
         self._btn_merge.setEnabled(False)
         self._log.clear()
 
+        if self._worker is not None:
+            self._disconnect_worker(self._worker)
+            self._worker.deleteLater()
+
         self._worker = SynthesisWorker(
             self._sentences, self._audio_name,
             self._output_dir, self._client,
+            indices=indices_to_synth,
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.sentence_done.connect(self._on_sentence_done)
@@ -294,6 +368,31 @@ class SynthesisPanel(QWidget):
             self._was_canceled = True
             self._worker.cancel()
             self._log_msg("正在停止…")
+
+    def _disconnect_worker(self, worker):
+        """断开 worker 的所有信号，避免旧回调命中新工程状态。"""
+        if worker is None:
+            return
+        try:
+            worker.progress.disconnect()
+        except Exception:
+            pass
+        try:
+            worker.sentence_done.disconnect()
+        except Exception:
+            pass
+        try:
+            worker.log.disconnect()
+        except Exception:
+            pass
+        try:
+            worker.error.disconnect()
+        except Exception:
+            pass
+        try:
+            worker.finished.disconnect()
+        except Exception:
+            pass
 
     def _on_progress(self, current, total, text):
         self._progress.setValue(current)
@@ -312,17 +411,26 @@ class SynthesisPanel(QWidget):
             self._log_msg("━━━━━━━━━━ 已取消 ━━━━━━━━━━")
             return
 
-        # 保存 WAV 映射
-        if wav_map:
-            self._project.wav_map = wav_map
-            self._project.save()
-            self._log_msg(f"📝 WAV 映射已保存: {len(wav_map)} 条")
+        # 保存 WAV 映射（合并新结果与已有映射）
+        existing_map = {entry["index"]: entry for entry in self._project.wav_map}
+        for entry in (wav_map or []):
+            existing_map[entry["index"]] = entry
+        self._project.wav_map = list(existing_map.values())
+        self._project.save()
+        self._log_msg(f"📝 WAV 映射已保存: {len(self._project.wav_map)} 条")
 
         self._progress.setValue(self._progress.maximum())
-        self._status_label.setText("合成完成 ✓")
-        self._log_msg("━━━━━━━━━━ 完成 ━━━━━━━━━━")
-        self._btn_merge.setEnabled(True)
-        self.synthesis_done.emit(self._output_dir)
+
+        if len(self._project.wav_map) == len(self._sentences):
+            self._status_label.setText("合成完成 ✓")
+            self._log_msg("━━━━━━━━━━ 完成 ━━━━━━━━━━")
+            self._btn_merge.setEnabled(True)
+            self.synthesis_done.emit(self._output_dir)
+        else:
+            missing = len(self._sentences) - len(self._project.wav_map)
+            self._status_label.setText(f"合成完成，但 {missing} 句失败")
+            self._log_msg(f"⚠ 合成完成，但 {missing} 句失败，请检查日志")
+            self._btn_merge.setEnabled(False)
 
     def _on_segment_regenerate_request(self, index: int):
         """右侧片段被选中/双击，显示/隐藏按钮。"""
@@ -344,51 +452,58 @@ class SynthesisPanel(QWidget):
         """点击「预览」按钮，播放选中的合成片段。"""
         if not hasattr(self, '_regen_index') or self._regen_index < 0:
             return
-        from index_tts_gui.core.merger import collect_sentence_wavs
-        wavs = collect_sentence_wavs(self._output_dir)
         idx = self._regen_index
+        wav_name = f"sentence_{idx + 1:02d}_"
+        wavs = collect_sentence_wavs(self._output_dir)
         for wav in wavs:
             name = os.path.basename(wav)
-            if name.startswith(f"sentence_{idx:02d}_"):
+            if name.startswith(wav_name):
                 self._voice_panel.preview_segment(wav)
                 return
         self._log_msg(f"⚠ 未找到第 {idx+1} 句的音频文件")
 
     def _regenerate_single(self, index: int):
         """重新合成单句（后台线程）。"""
+        if self._client is None:
+            self._log_msg("⚠ 未配置 TTS API，请在左侧「设置」中填写 API URL")
+            return
         if index < 0 or index >= len(self._sentences):
             return
-        from PySide6.QtCore import QThread
-        from index_tts_gui.core.merger import sanitize_for_filename
 
-        sentence = self._sentences[index]
-        audio_name = self._audio_name
-        output_dir = self._output_dir
-        client = self._client
-        log_msg = self._log_msg
+        if self._single_worker is not None:
+            self._disconnect_worker(self._single_worker)
+            self._single_worker = None
 
-        class _SingleSynthThread(QThread):
-            def run(self):
-                try:
-                    audio_bytes = client.synthesize(sentence, audio_name)
-                    text_part = sanitize_for_filename(sentence)
-                    wav_path = os.path.join(
-                        output_dir, f"sentence_{index:02d}_{text_part}.wav"
-                    )
-                    with open(wav_path, "wb") as f:
-                        f.write(audio_bytes)
-                    log_msg(f"🔄 重新合成: 第 {index+1} 句 → {os.path.basename(wav_path)}")
-                except Exception as e:
-                    log_msg(f"✗ 重新合成第 {index+1} 句失败: {e}")
+        self._single_worker = SingleSynthesisWorker(
+            index=index,
+            sentence=self._sentences[index],
+            audio_name=self._audio_name,
+            output_dir=self._output_dir,
+            client=self._client,
+        )
+        self._single_worker.log.connect(self._log_msg)
+        self._single_worker.success.connect(self._on_single_synth_success)
+        self._single_worker.error.connect(self._on_single_synth_error)
+        self._single_worker.finished.connect(self._single_worker.deleteLater)
+        self._single_worker.start()
 
-        self._single_thread = _SingleSynthThread()
-        self._single_thread.start()
+    def _on_single_synth_success(self, index: int, wav_path: str):
+        # 更新 WAV 映射
+        existing = {e["index"]: e for e in self._project.wav_map}
+        existing[index] = {
+            "index": index,
+            "text": self._sentences[index],
+            "wav": os.path.basename(wav_path),
+        }
+        self._project.wav_map = list(existing.values())
+        self._project.save()
+        self._refresh_merge_button()
+
+    def _on_single_synth_error(self, index: int, msg: str):
+        self._log_msg(f"✗ 重新合成第 {index+1} 句失败: {msg}")
 
     def _log_msg(self, msg: str):
         self._log.appendPlainText(msg)
-        # 强制刷新，防止长操作时日志区冻结
-        from PySide6.QtWidgets import QApplication
-        QApplication.processEvents()
 
     def _clear_output_dir(self):
         """清空输出目录下的生成文件。"""
@@ -408,6 +523,7 @@ class SynthesisPanel(QWidget):
 
         self._log_msg(f"🗑 已清空输出目录，删除 {removed} 个文件")
         self._project.pauses = []
+        self._project.wav_map = []
         self._project.save()
         self._voice_panel.clear_segments()
         self._refresh_merge_button()
@@ -420,8 +536,31 @@ class SynthesisPanel(QWidget):
 
         logger.info("开始合并: output_dir=%s sentences=%d", self._output_dir, len(self._sentences))
 
+        if self._merge_worker is not None and self._merge_worker.isRunning():
+            self._log_msg("⚠ 正在合并中，请稍候")
+            return
+
         self._btn_merge.setEnabled(False)
         self._status_label.setText("正在合并完整音频…")
+
+        if self._merge_worker is not None:
+            try:
+                self._merge_worker.log.disconnect()
+            except Exception:
+                pass
+            try:
+                self._merge_worker.progress.disconnect()
+            except Exception:
+                pass
+            try:
+                self._merge_worker.finished.disconnect()
+            except Exception:
+                pass
+            try:
+                self._merge_worker.error.disconnect()
+            except Exception:
+                pass
+            self._merge_worker.deleteLater()
 
         self._merge_worker = MergeWorker(
             self._sentences, self._output_dir, self._llm_cfg
@@ -430,6 +569,8 @@ class SynthesisPanel(QWidget):
         self._merge_worker.progress.connect(self._on_merge_progress)
         self._merge_worker.finished.connect(self._on_merge_finished)
         self._merge_worker.error.connect(self._on_merge_error)
+        self._merge_worker.finished.connect(self._merge_worker.deleteLater)
+        self._merge_worker.error.connect(self._merge_worker.deleteLater)
         self._merge_worker.start()
 
     def _on_merge_progress(self, current: int, total: int, message: str):
@@ -483,8 +624,9 @@ class SynthesisPanel(QWidget):
         )
         for f in wavs:
             parsed = parse_sentence_wav_name(f)
-            idx = parsed[0] if parsed else 0
-            self._voice_panel.add_segment(idx, f)
+            # parse_sentence_wav_name 返回 1-based 序号
+            idx_1based = parsed[0] if parsed else 0
+            self._voice_panel.add_segment(idx_1based, f)
 
     def reset_for_new_project(self):
         """新建工程时清空面板状态。"""

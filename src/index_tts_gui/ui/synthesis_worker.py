@@ -19,13 +19,20 @@ class SynthesisWorker(QThread):
     error = Signal(str)                  # 错误信息
     log = Signal(str)                    # 日志
 
-    def __init__(self, sentences: list[str], audio_name: str,
-                 output_dir: str, client: TTSClient):
+    def __init__(
+        self,
+        sentences: list[str],
+        audio_name: str,
+        output_dir: str,
+        client: TTSClient,
+        indices: list[int] | None = None,
+    ):
         super().__init__()
         self._sentences = sentences
         self._audio_name = audio_name
         self._output_dir = output_dir
         self._client = client
+        self._indices = indices if indices is not None else list(range(len(sentences)))
         self._canceled = False
         self._wav_map: list[dict] = []
 
@@ -35,22 +42,25 @@ class SynthesisWorker(QThread):
         self._canceled = True
 
     def run(self):
-        total = len(self._sentences)
+        total = len(self._indices)
         logger.info(
             "开始合成: total=%d audio_name=%s output_dir=%s",
             total, self._audio_name, self._output_dir,
         )
         self.log.emit(f"开始合成 {total} 句…")
 
-        for i, sentence in enumerate(self._sentences, 1):
+        for loop_i, sentence_index in enumerate(self._indices, 1):
             if self._canceled:
                 self.log.emit("已取消")
-                logger.info("合成已取消，已完成 %d/%d", i - 1, total)
+                logger.info("合成已取消，已完成 %d/%d", loop_i - 1, total)
                 break
 
-            self.progress.emit(i, total, sentence)
-            self.log.emit(f"[{i}/{total}] {sentence[:40]}...")
-            logger.info("合成第 %d/%d 句: %s", i, total, sentence[:80])
+            sentence = self._sentences[sentence_index]
+            # 1-based 用于文件名与显示
+            i = sentence_index + 1
+            self.progress.emit(loop_i, total, sentence)
+            self.log.emit(f"[{loop_i}/{total}] {sentence[:40]}...")
+            logger.info("合成第 %d/%d 句: %s", loop_i, total, sentence[:80])
 
             try:
                 audio_bytes = self._client.synthesize(
@@ -69,7 +79,7 @@ class SynthesisWorker(QThread):
                 )
                 self.sentence_done.emit(i, wav_path)
                 self._wav_map.append({
-                    "index": i - 1,  # 0-based
+                    "index": sentence_index,  # 0-based
                     "text": sentence,
                     "wav": os.path.basename(wav_path),
                 })

@@ -52,7 +52,7 @@ class SubtitleRegenerateWorker(QThread):
                 )
             else:
                 entries = generate_srt_from_sentences(
-                    "", self._sentences, wavs
+                    self._sentences, wavs
                 )
             self.finished.emit(entries)
         except Exception as e:

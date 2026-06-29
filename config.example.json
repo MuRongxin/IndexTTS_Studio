@@ -1,8 +1,8 @@
 {
   "provider": "index_tts",
-  "api_url": "http://127.0.0.1:5000",
+  "api_url": "",
   "timeout": {
-    "check": 5,
+    "check": 10,
     "upload": 30,
     "synthesize": 120
   },
@@ -13,10 +13,13 @@
     "preset": "deepseek",
     "api_url": "https://api.deepseek.com",
     "api_key": "",
+    "deepseek_key": "",
+    "mimo_key": "",
     "model": "deepseek-v4-flash",
     "timeout": 60,
     "max_completion_tokens": 2048,
     "max_sentence_length": 40,
-    "user_prompt_template": ""
+    "user_prompt_template": "",
+    "punctuation_fallback": false
   }
 }

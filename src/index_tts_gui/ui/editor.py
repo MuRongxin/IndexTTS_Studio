@@ -276,6 +276,10 @@ class ManuscriptPanel(QWidget):
         self._emit_timer.setSingleShot(True)
         self._emit_timer.timeout.connect(self._emit_sentences)
 
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.timeout.connect(self._save_text_to_project)
+
     def set_llm_config(self, cfg: dict):
         """外部注入 LLM 配置。"""
         self._llm_cfg = cfg or {}
@@ -308,9 +312,16 @@ class ManuscriptPanel(QWidget):
     def _on_text_changed(self):
         text = self._editor.toPlainText()
         self._project.source_text = text
-        self._project.save()
         self.text_changed.emit(text)
         self._update_stats()
+        self._save_timer.stop()
+        self._save_timer.start(300)
+
+    def _save_text_to_project(self):
+        try:
+            self._project.save()
+        except Exception as e:
+            logger.error("自动保存工程失败: %s", e)
 
     def _on_cell_changed(self, row: int, col: int):
         if col != 1 or row >= len(self._sentences):
@@ -408,6 +419,10 @@ class ManuscriptPanel(QWidget):
             self._status_label.setText("请先输入文稿")
             return
 
+        if self._worker is not None and self._worker.isRunning():
+            self._status_label.setText("拆分进行中，请稍候")
+            return
+
         mode_map = {"LLM": "llm", "自动": "auto", "规则": "rule"}
         mode = mode_map[self._mode_combo.currentText()]
 
@@ -424,6 +439,17 @@ class ManuscriptPanel(QWidget):
         self._status_label.setText("正在拆分…")
         self._load_table([])
 
+        if self._worker is not None:
+            try:
+                self._worker.progress.disconnect()
+            except Exception:
+                pass
+            try:
+                self._worker.finished.disconnect()
+            except Exception:
+                pass
+            self._worker.deleteLater()
+
         self._worker = SplitWorker(
             text=text,
             mode=mode,
@@ -432,6 +458,7 @@ class ManuscriptPanel(QWidget):
         )
         self._worker.progress.connect(self._on_split_progress)
         self._worker.finished.connect(self._on_split_finished)
+        self._worker.finished.connect(self._worker.deleteLater)
         self._worker.start()
 
     def _on_split_progress(self, current: int, total: int, message: str):

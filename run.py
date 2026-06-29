@@ -4,4 +4,6 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 from index_tts_gui.main import main
-main()
+
+if __name__ == "__main__":
+    main()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -277,6 +278,20 @@ class SubtitleTrack:
         second_text = text[best_pos:].lstrip(punct + " ")
         return first_text, second_text
 
+    @staticmethod
+    def _merge_text(parts: list[str]) -> str:
+        """拼接字幕文本。若全部为中文字符则直接拼接，否则用空格连接。"""
+        stripped = [p.strip() for p in parts if p and p.strip()]
+        if not stripped:
+            return ""
+        # 判断是否存在非中文/非标点/非空格的字符
+        has_non_cjk = any(
+            re.search(r"[a-zA-Z0-9]", part) for part in stripped
+        )
+        if has_non_cjk:
+            return " ".join(stripped)
+        return "".join(stripped)
+
     def merge_items(self, index1: int, index2: int) -> None:
         """合并两条字幕（按序号）"""
         idx1 = index1 - 1
@@ -295,8 +310,7 @@ class SubtitleTrack:
         item2 = self.items[idx2]
 
         item1.end_time = max(item1.end_time, item2.end_time)
-        text_parts = [item1.text.strip(), item2.text.strip()]
-        item1.text = " ".join(part for part in text_parts if part)
+        item1.text = self._merge_text([item1.text, item2.text])
 
         del self.items[idx2]
         self.reindex()
@@ -322,7 +336,7 @@ class SubtitleTrack:
             if part:
                 text_parts.append(part)
         first_item.end_time = last_item.end_time
-        first_item.text = " ".join(text_parts)
+        first_item.text = self._merge_text(text_parts)
 
         # 删除其余项目（从后往前避免索引变化）
         to_delete = sorted(

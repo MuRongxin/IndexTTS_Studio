@@ -1,4 +1,5 @@
 """音色管理面板"""
+import logging
 import os
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
@@ -12,6 +13,9 @@ from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from index_tts_gui.core.tts_client import BaseTTSClient, IndexTTSClient
 from index_tts_gui.core.project import Project
 from index_tts_gui.ui.voice_upload_worker import VoiceUploadWorker
+
+
+logger = logging.getLogger("index_tts")
 
 
 class _AudioListItem(QWidget):
@@ -63,7 +67,13 @@ class VoicePanel(QWidget):
     def __init__(self, project: Project, client: BaseTTSClient | None = None):
         super().__init__()
         self._project = project
-        self._client = client or IndexTTSClient()
+        if client is None:
+            try:
+                client = IndexTTSClient()
+            except ValueError as e:
+                logger.warning("未配置 TTS API: %s", e)
+                client = None
+        self._client = client
         self._audio_path: str = ""
         self._audio_name: str = ""
         self._worker: VoiceUploadWorker | None = None
@@ -77,9 +87,18 @@ class VoicePanel(QWidget):
 
     def _load_default_audio(self):
         """启动时默认加载项目目录下的参考音频。"""
-        default = os.path.join(os.getcwd(), "作为愚人众的十一执行官.wav")
-        if os.path.exists(default):
-            self._load_audio(default)
+        if not self._project:
+            return
+        project_dir = self._project.project_dir
+        try:
+            wav_files = [
+                f for f in os.listdir(project_dir)
+                if f.lower().endswith(".wav") and os.path.isfile(os.path.join(project_dir, f))
+            ]
+        except Exception:
+            wav_files = []
+        if wav_files:
+            self._load_audio(os.path.join(project_dir, sorted(wav_files)[0]))
 
     def _restore_from_project(self):
         """从工程恢复已记录的音频列表和当前选择。"""
@@ -110,10 +129,12 @@ class VoicePanel(QWidget):
             if os.path.exists(path):
                 self._load_audio(path)
                 return
-        # 文件找不到时，至少记录名称并启用上传状态提示
+        # 文件找不到时，清空路径并禁用上传，避免上传旧文件
+        self._audio_path = ""
         self._audio_name = stored_name
         self._file_label.setText(f"📁 {stored_name} (文件缺失)")
-        self._btn_upload.setEnabled(True)
+        self._btn_play.setEnabled(False)
+        self._btn_upload.setEnabled(False)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -217,13 +238,15 @@ class VoicePanel(QWidget):
 
     def _drag_enter(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
-            url = event.mimeData().urls()[0]
-            if url.toLocalFile().lower().endswith('.wav'):
+            urls = event.mimeData().urls()
+            if urls and all(u.toLocalFile().lower().endswith('.wav') for u in urls):
                 event.acceptProposedAction()
 
     def _drop_event(self, event: QDropEvent):
-        path = event.mimeData().urls()[0].toLocalFile()
-        self._load_audio(path)
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path.lower().endswith('.wav'):
+                self._load_audio(path)
 
     def _browse(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -369,9 +392,12 @@ class VoicePanel(QWidget):
         self._remove_audio_path(path)
 
     def add_segment(self, index: int, filename: str):
-        """合成完成一句后追加到右侧片段列表。"""
+        """合成完成一句后追加到右侧片段列表。
+
+        index 为 1-based 句子序号，内部统一存储为 0-based。
+        """
         item = QListWidgetItem(f"📄 {filename}")
-        item.setData(Qt.UserRole, index)  # 存储句子索引
+        item.setData(Qt.UserRole, index - 1)  # 统一存储 0-based 索引
         item.setToolTip(f"第 {index} 句: {filename}\n双击预览，选中可重新生成")
         self._segment_list_widget.addItem(item)
         self._segment_list_widget.scrollToBottom()
@@ -390,8 +416,10 @@ class VoicePanel(QWidget):
         if index is None or not self._project:
             return
         output_dir = self._project.output_dir
+        # index 内部为 0-based，文件名为 1-based
+        file_prefix = f"sentence_{index + 1:02d}_"
         for f in os.listdir(output_dir):
-            if f.startswith(f"sentence_{index:02d}_") and f.endswith(".wav"):
+            if f.startswith(file_prefix) and f.endswith(".wav"):
                 self.segment_preview.emit(os.path.join(output_dir, f))
                 return
 
@@ -425,11 +453,30 @@ class VoicePanel(QWidget):
         self._play_status.setText(f"播放失败: {error_str}")
 
     def _upload(self):
+        if self._client is None:
+            self._upload_status.setText("⚠ 未配置 TTS API")
+            self._upload_status.setStyleSheet("color: #d32f2f;")
+            return
         if not self._audio_path:
             return
 
         if self._worker and self._worker.isRunning():
             return
+
+        if self._worker is not None:
+            try:
+                self._worker.success.disconnect()
+            except Exception:
+                pass
+            try:
+                self._worker.error.disconnect()
+            except Exception:
+                pass
+            try:
+                self._worker.finished.disconnect()
+            except Exception:
+                pass
+            self._worker.deleteLater()
 
         self._btn_upload.setEnabled(False)
         self._upload_status.setText("上传中…")
@@ -441,6 +488,7 @@ class VoicePanel(QWidget):
         self._worker.success.connect(self._on_upload_success)
         self._worker.error.connect(self._on_upload_error)
         self._worker.finished.connect(self._on_upload_finished)
+        self._worker.finished.connect(self._worker.deleteLater)
         self._worker.start()
 
     def _on_upload_success(self, audio_name: str):

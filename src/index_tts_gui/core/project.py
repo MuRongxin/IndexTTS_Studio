@@ -69,7 +69,7 @@ class Project:
         os.makedirs(self.output_dir, exist_ok=True)
 
     def save(self):
-        """把工程状态写入 project.json。"""
+        """把工程状态原子地写入 project.json。"""
         self.ensure_dirs()
         self.updated_at = datetime.now().isoformat()
         data = {
@@ -84,11 +84,18 @@ class Project:
             "wav_map": self.wav_map,
             "pauses": self.pauses,
         }
+        tmp_path = self.project_file_path + ".tmp"
         try:
-            with open(self.project_file_path, "w", encoding="utf-8") as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(tmp_path, self.project_file_path)
         except Exception as e:
             logger.exception("保存工程失败: %s", self.project_file_path)
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
             raise RuntimeError(f"保存工程失败: {e}") from e
 
     @classmethod
@@ -153,13 +160,21 @@ class Project:
         if os.path.exists(old_output_dir) and os.path.isdir(old_output_dir):
             try:
                 if os.listdir(old_output_dir):
-                    # 如果目标已存在且有内容，先删除空目录
-                    if os.path.exists(project.output_dir):
-                        try:
-                            os.rmdir(project.output_dir)
-                        except OSError:
-                            pass
-                    shutil.move(old_output_dir, project.output_dir)
+                    os.makedirs(project.output_dir, exist_ok=True)
+                    for name in os.listdir(old_output_dir):
+                        src = os.path.join(old_output_dir, name)
+                        dst = os.path.join(project.output_dir, name)
+                        if os.path.exists(dst):
+                            logger.warning(
+                                "迁移旧 output_tts 时目标已存在，跳过: %s", name
+                            )
+                            continue
+                        shutil.move(src, dst)
+                    # 如果旧目录已空则删除
+                    try:
+                        os.rmdir(old_output_dir)
+                    except OSError:
+                        pass
             except Exception as e:
                 # 迁移失败也不影响使用，直接创建新的输出目录
                 logger.warning("迁移旧 output_tts 失败: %s", e)

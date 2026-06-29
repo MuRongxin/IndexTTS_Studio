@@ -43,8 +43,8 @@ def test_hybrid_splitter_fallback():
     bad_llm = LLMSplitter(api_url="", api_key="", model="")
     splitter = HybridSplitter(llm_splitter=bad_llm)
     text = "你好。这是测试！"
-    sentences, used_llm = splitter.split(text)
-    assert not used_llm
+    sentences = splitter.split(text)
+    assert not splitter.used_llm
     assert len(sentences) == 2
     print("✓ hybrid_splitter fallback")
 

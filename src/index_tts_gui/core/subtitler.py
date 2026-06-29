@@ -1,6 +1,7 @@
 """
 字幕生成：能量检测 + 文本切分 → SRT
 """
+import os
 import re
 import numpy as np
 import librosa
@@ -43,7 +44,6 @@ def _build_entries_for_sentence(
 
 
 def generate_srt_from_sentences(
-    full_audio_path: str,
     sentences: list[str],
     sentence_wavs: list[str],
     max_chars: int = 24,
@@ -98,42 +98,41 @@ def generate_srt_from_sentences_with_pauses(
 
 
 def generate_srt(
-    full_audio_path: str,
     manuscript_text: str,
     sentence_wavs: list[str],
     max_chars: int = 24,
 ) -> list[SubtitleEntry]:
     """
     生成字幕条目列表。
-    
+
     策略：
     1. 按句末标点拆分原文
     2. 每个句子 WAV 获取精确时长
     3. 对长句（>max_chars）用能量检测找内部停顿
     4. 在停顿 + 标点处切分子幕
-    
+
     Args:
-        full_audio_path: 完整音频路径（用于波形检测，备用）
         manuscript_text: 原文全文
         sentence_wavs: 按顺序的每句 WAV 路径列表
         max_chars: 每条字幕最大字符数
-    
+
     Returns:
         SubtitleEntry 列表
     """
     sentences = _split_manuscript(manuscript_text)
     return generate_srt_from_sentences(
-        full_audio_path, sentences, sentence_wavs, max_chars
+        sentences, sentence_wavs, max_chars
     )
 
 
 def entries_to_srt(entries: list[SubtitleEntry]) -> str:
     """将字幕条目转为 SRT 字符串"""
     def _fmt(sec: float) -> str:
+        sec = max(0.0, sec)
         h = int(sec // 3600)
         m = int((sec % 3600) // 60)
         s = int(sec % 60)
-        ms = int((sec - int(sec)) * 1000)
+        ms = round((sec % 1) * 1000) % 1000
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
     lines = []
@@ -148,7 +147,7 @@ def entries_to_srt(entries: list[SubtitleEntry]) -> str:
 # ── 内部辅助 ──
 
 def _split_manuscript(text: str) -> list[str]:
-    text = re.sub(r'\n+', '', text)
+    text = re.sub(r'\n+', ' ', text)
     raw = re.split(r'(?<=[。！？])', text)
     raw = [s.strip() for s in raw if s.strip()]
     merged = []
@@ -164,12 +163,23 @@ def _split_manuscript(text: str) -> list[str]:
 
 def _get_duration(wav_path: str) -> float:
     import subprocess, json
-    r = subprocess.run(
+    result = subprocess.run(
         ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
          "-of", "json", wav_path],
-        capture_output=True, text=True,
+        capture_output=True, text=True, timeout=30.0,
     )
-    return float(json.loads(r.stdout)["format"]["duration"])
+    if result.returncode != 0:
+        err = result.stderr.strip()[:500]
+        raise RuntimeError(f"ffprobe 失败 ({wav_path}): {err}")
+    if not result.stdout.strip():
+        raise RuntimeError(f"ffprobe 返回为空: {wav_path}")
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"ffprobe 输出不是有效 JSON: {wav_path} - {e}") from e
+    if "format" not in data or "duration" not in data["format"]:
+        raise RuntimeError(f"无法获取音频时长: {wav_path}")
+    return float(data["format"]["duration"])
 
 
 PUNCT = '。！？；：，、'
@@ -177,18 +187,24 @@ PUNCT = '。！？；：，、'
 
 def _detect_pauses(wav_path: str) -> list[float]:
     """返回归一化停顿位置列表（0~1）"""
+    if not os.path.exists(wav_path):
+        raise FileNotFoundError(f"音频文件不存在: {wav_path}")
     try:
         y, sr = sf.read(wav_path)
         hop = int(sr * 0.010)
         frame = int(sr * 0.025)
         rms = librosa.feature.rms(y=y, frame_length=frame, hop_length=hop)[0]
-        thresh = np.max(rms) * 0.03
+        max_rms = np.max(rms)
+        if max_rms <= 0:
+            logger.warning("音频能量为 0，无法检测停顿: %s", wav_path)
+            return []
+        thresh = max_rms * 0.03
         is_speech = rms > thresh
 
-        min_gap = int(0.15 / 0.010)
         pauses = []
         in_silence = False
         silence_start = 0
+        total_frames = len(is_speech)
         for i, speech in enumerate(is_speech):
             if not speech and not in_silence:
                 silence_start = i
@@ -197,7 +213,7 @@ def _detect_pauses(wav_path: str) -> list[float]:
                 dur = (i - silence_start) * 0.010
                 if dur > 0.15:
                     mid = (silence_start + i) / 2
-                    pauses.append(mid / len(is_speech))
+                    pauses.append(mid / total_frames)
                 in_silence = False
 
         if pauses:
@@ -207,7 +223,10 @@ def _detect_pauses(wav_path: str) -> list[float]:
                     filtered.append(p)
             return filtered
         return []
-    except Exception:
+    except FileNotFoundError:
+        raise
+    except Exception as e:
+        logger.warning("能量检测停顿失败，回退到按字符比例切分: %s - %s", wav_path, e)
         return []
 
 

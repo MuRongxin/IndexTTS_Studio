@@ -13,7 +13,7 @@ import sys
 import time
 import traceback
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from index_tts_gui.core.splitter import create_splitter
 from index_tts_gui.core.llm_client import LLMClient

@@ -381,22 +381,32 @@ class SubtitlePanel(QWidget):
             self._load_audio_path(path)
 
     def _load_audio_path(self, path: str):
-        self._audio_path = path
-        self._player.setSource(QUrl.fromLocalFile(path))
+        try:
+            self._audio_path = path
+            self._player.setSource(QUrl.fromLocalFile(path))
 
-        # 后台加载波形
-        success = self._audio_engine.load_audio(path)
-        if success:
-            self._timeline.set_audio_engine(self._audio_engine)
-            self._timeline.set_duration(self._audio_engine.duration)
-        else:
+            # 后台加载波形
+            success = self._audio_engine.load_audio(path)
+            if success:
+                self._timeline.set_audio_engine(self._audio_engine)
+                self._timeline.set_duration(self._audio_engine.duration)
+            else:
+                self._audio_engine.clear()
+                self._timeline.set_audio_engine(None)
+
+            self._btn_load_audio.setText(f"📂 {os.path.basename(path)}")
+            self._btn_play.setEnabled(True)
+            self._btn_stop.setEnabled(True)
+            self._seek.setEnabled(True)
+        except Exception as e:
+            logger.exception("加载音频失败: %s", path)
+            self._audio_path = ""
             self._audio_engine.clear()
             self._timeline.set_audio_engine(None)
-
-        self._btn_load_audio.setText(f"📂 {os.path.basename(path)}")
-        self._btn_play.setEnabled(True)
-        self._btn_stop.setEnabled(True)
-        self._seek.setEnabled(True)
+            self._btn_load_audio.setText("📂 加载音频")
+            self._btn_play.setEnabled(False)
+            self._btn_stop.setEnabled(False)
+            self._seek.setEnabled(False)
 
     def _toggle_play(self):
         if self._player.playbackState() == QMediaPlayer.PlayingState:
@@ -1056,15 +1066,37 @@ class SubtitlePanel(QWidget):
         pauses: list[float] | None = None, silent: bool = False,
     ):
         """启动后台字幕生成线程。silent=True 时失败不弹窗。"""
+        if self._regen_worker is not None:
+            try:
+                self._regen_worker.finished.disconnect()
+            except Exception:
+                pass
+            try:
+                self._regen_worker.error.disconnect()
+            except Exception:
+                pass
+            self._regen_worker.deleteLater()
+
         self._regen_worker = SubtitleRegenerateWorker(sentences, output_dir, pauses)
+        # 记录启动时的工程，避免结果覆盖新工程
+        self._regen_worker.setProperty("project_dir", self._project.project_dir if self._project else "")
         self._regen_worker.finished.connect(self._on_regen_finished)
         if silent:
             self._regen_worker.error.connect(lambda msg: None)  # 静默
         else:
             self._regen_worker.error.connect(self._on_regen_error)
+        self._regen_worker.finished.connect(self._regen_worker.deleteLater)
         self._regen_worker.start()
 
     def _on_regen_finished(self, entries):
+        sender = self.sender()
+        expected_dir = ""
+        if sender is not None:
+            expected_dir = sender.property("project_dir") or ""
+        current_dir = self._project.project_dir if self._project else ""
+        if expected_dir and expected_dir != current_dir:
+            # 工程已切换，丢弃旧结果
+            return
         self.load_entries(entries)
 
     def _on_regen_error(self, msg: str):

@@ -1,6 +1,7 @@
 """合并 worker — 在后台线程执行音频合并与字幕生成"""
 import logging
 import os
+import subprocess
 from PySide6.QtCore import QThread, Signal
 
 from index_tts_gui.core.merger import (
@@ -8,6 +9,7 @@ from index_tts_gui.core.merger import (
     merge_wavs_with_custom_pauses,
     validate_wav_order,
 )
+from index_tts_gui.core.pause_rules import compute_pauses
 from index_tts_gui.core.llm_service import LLMService, LLMServiceError
 from index_tts_gui.core.subtitler import generate_srt_from_sentences_with_pauses
 
@@ -34,14 +36,30 @@ class MergeWorker(QThread):
         self._output_dir = output_dir
         self._llm_cfg = llm_cfg or {}
         self._canceled = False
+        self._process: subprocess.Popen | None = None
         self.pauses: list[float] = []
 
     def cancel(self):
         self._canceled = True
+        if self._process is not None and self._process.poll() is None:
+            try:
+                self._process.terminate()
+            except Exception:
+                pass
+
+    def _check_canceled(self):
+        if self._canceled:
+            raise RuntimeError("合并已取消")
 
     def run(self):
         try:
             self._do_merge()
+        except RuntimeError as e:
+            if str(e) == "合并已取消":
+                self.log.emit("━━━━━━━━━━ 合并已取消 ━━━━━━━━━━")
+                return
+            logger.exception("合并完整音频失败")
+            self.error.emit(str(e))
         except Exception as e:
             logger.exception("合并完整音频失败")
             self.error.emit(str(e))
@@ -60,6 +78,7 @@ class MergeWorker(QThread):
                 f"音频片段数（{len(wavs)}）与句子数（{len(self._sentences)}）不一致"
             )
 
+        self._check_canceled()
         self.progress.emit(2, 4, "校验文件顺序")
         errors = validate_wav_order(wavs, self._sentences)
         if errors:
@@ -67,13 +86,16 @@ class MergeWorker(QThread):
                 self.log.emit(f"  - {err}")
             raise RuntimeError("音频文件与当前句子不匹配，请重新合成")
 
+        self._check_canceled()
         self.progress.emit(3, 4, "获取停顿建议")
         self.pauses = self._resolve_pauses()
 
+        self._check_canceled()
         self.progress.emit(4, 4, "合并音频并生成字幕")
         merge_wavs_with_custom_pauses(wavs, self.pauses, output_path)
         self.log.emit(f"✓ 已生成完整音频: {output_path}")
 
+        self._check_canceled()
         entries = generate_srt_from_sentences_with_pauses(
             self._sentences, wavs, self.pauses
         )
@@ -107,7 +129,6 @@ class MergeWorker(QThread):
             )
 
         # 回退到标点规则
-        from index_tts_gui.core.merger import _compute_pauses
-        pauses = _compute_pauses(self._sentences)
+        pauses = compute_pauses(self._sentences)
         self.log.emit(f"📐 标点规则停顿: {pauses}")
         return pauses

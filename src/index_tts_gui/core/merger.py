@@ -7,22 +7,36 @@ import os
 import re
 import subprocess
 import tempfile
+from urllib.parse import quote
+
+from index_tts_gui.core.pause_rules import compute_pauses
 
 
 logger = logging.getLogger("index_tts")
 
 
+def _run_ffprobe(args: list[str], wav_path: str, timeout: float = 30.0) -> dict:
+    """调用 ffprobe 并校验返回结果。"""
+    result = subprocess.run(
+        ["ffprobe", "-v", "quiet"] + args + [wav_path],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    if result.returncode != 0:
+        err = result.stderr.strip()[:500]
+        raise RuntimeError(f"ffprobe 失败 ({wav_path}): {err}")
+    if not result.stdout.strip():
+        raise RuntimeError(f"ffprobe 返回为空: {wav_path}")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"ffprobe 输出不是有效 JSON: {wav_path} - {e}") from e
+
+
 def get_wav_duration(wav_path: str) -> float:
     """获取 WAV 文件时长（秒）"""
-    result = subprocess.run(
-        [
-            "ffprobe", "-v", "quiet",
-            "-show_entries", "format=duration",
-            "-of", "json", wav_path,
-        ],
-        capture_output=True, text=True,
+    data = _run_ffprobe(
+        ["-show_entries", "format=duration", "-of", "json"], wav_path
     )
-    data = json.loads(result.stdout)
     if "format" not in data or "duration" not in data["format"]:
         raise RuntimeError(f"无法获取音频时长: {wav_path}")
     return float(data["format"]["duration"])
@@ -30,15 +44,11 @@ def get_wav_duration(wav_path: str) -> float:
 
 def _get_audio_info(wav_path: str) -> tuple[int, int]:
     """获取 WAV 采样率和声道数。"""
-    result = subprocess.run(
-        [
-            "ffprobe", "-v", "quiet",
-            "-show_entries", "stream=sample_rate,channels",
-            "-of", "json", wav_path,
-        ],
-        capture_output=True, text=True,
+    data = _run_ffprobe(
+        ["-show_entries", "stream=sample_rate,channels", "-of", "json"], wav_path
     )
-    data = json.loads(result.stdout)
+    if "streams" not in data or not data["streams"]:
+        raise RuntimeError(f"无法获取音频流信息: {wav_path}")
     stream = data["streams"][0]
     return int(stream["sample_rate"]), int(stream["channels"])
 
@@ -57,33 +67,8 @@ def _generate_silence(duration: float, ref_path: str, output_path: str):
             "-ac", str(channels),
             output_path,
         ],
-        check=True, capture_output=True,
+        check=True, capture_output=True, timeout=30.0,
     )
-
-
-def _compute_pauses(sentences: list[str], base_pause: float = 0.12) -> list[float]:
-    """
-    根据句子末尾标点计算每句之后的停顿时长。
-
-    最后一句后面返回 0（不需要停顿）。
-    """
-    pauses = []
-    for s in sentences:
-        s = s.strip()
-        if not s:
-            pauses.append(base_pause)
-            continue
-        last_char = s[-1]
-        if last_char in "。！？":
-            pauses.append(0.55)
-        elif last_char in "，、；：":
-            pauses.append(0.22)
-        else:
-            pauses.append(base_pause)
-    # 最后一句不需要尾部停顿
-    if pauses:
-        pauses[-1] = 0.0
-    return pauses
 
 
 def merge_wavs(wav_paths: list[str], output_path: str):
@@ -106,14 +91,16 @@ def merge_wavs(wav_paths: list[str], output_path: str):
     try:
         with os.fdopen(fd, "w") as f:
             for p in wav_paths:
-                f.write(f"file '{os.path.abspath(p)}'\n")
+                abs_path = os.path.abspath(p)
+                safe_path = quote(abs_path, safe="/")
+                f.write(f"file 'file://{safe_path}'\n")
 
-        result = subprocess.run(
+        subprocess.run(
             [
                 "ffmpeg", "-y", "-f", "concat", "-safe", "0",
                 "-i", list_path, "-c", "copy", output_path,
             ],
-            check=True, capture_output=True,
+            check=True, capture_output=True, timeout=300.0,
         )
         logger.info("合并完成: %s", output_path)
     except subprocess.CalledProcessError as e:
@@ -144,7 +131,7 @@ def merge_wavs_with_pauses(
         raise ValueError(
             f"音频片段数量（{len(wav_paths)}）与句子数量（{len(sentences)}）不一致"
         )
-    pauses = _compute_pauses(sentences, base_pause)
+    pauses = compute_pauses(sentences, base_pause)
     logger.info("标点规则停顿: %s", pauses)
     merge_wavs_with_custom_pauses(wav_paths, pauses, output_path)
 
@@ -179,8 +166,13 @@ def merge_wavs_with_custom_pauses(
             if pause > 0:
                 silence_path = os.path.join(tmpdir, f"silence_{i:04d}.wav")
                 logger.debug("生成静音: index=%d duration=%.2f", i, pause)
-                _generate_silence(pause, path, silence_path)
-                concat_items.append(silence_path)
+                try:
+                    _generate_silence(pause, path, silence_path)
+                    concat_items.append(silence_path)
+                except subprocess.CalledProcessError as e:
+                    err = e.stderr.decode("utf-8", errors="replace")[:500]
+                    logger.error("生成静音失败: index=%d error=%s", i, err)
+                    raise RuntimeError(f"生成第 {i} 段静音失败: {err}") from e
 
         merge_wavs(concat_items, output_path)
 

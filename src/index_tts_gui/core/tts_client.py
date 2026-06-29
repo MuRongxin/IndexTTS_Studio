@@ -13,33 +13,36 @@ from typing import Any
 import requests
 
 
-DEFAULT_API_URL = "http://117.50.216.139:8300"
+DEFAULT_API_URL = ""
 DEFAULT_TIMEOUT = {"check": 10, "upload": 30, "synthesize": 120}
 
 
 class BaseTTSClient(ABC):
-    """TTS 服务客户端抽象基类。"""
+    """TTS 服务客户端抽象基类。
+
+    各方法在请求失败或服务端返回异常时统一抛出 RuntimeError。
+    """
 
     @abstractmethod
     def health_check(self) -> str:
-        """检查服务是否可达，返回状态文本。"""
+        """检查服务是否可达，返回状态文本。失败时抛出 RuntimeError。"""
         ...
 
     @abstractmethod
     def check_audio(self, file_name: str) -> bool:
-        """检查参考音频是否已上传/可用。"""
+        """检查参考音频是否已上传/可用。失败时抛出 RuntimeError。"""
         ...
 
     @abstractmethod
     def upload_audio(self, file_path: str) -> dict:
-        """上传参考音频，返回服务端信息。"""
+        """上传参考音频，返回服务端信息。失败时抛出 RuntimeError。"""
         ...
 
     @abstractmethod
     def synthesize(
         self, text: str, audio_name: str, emo_text: str | None = None
     ) -> bytes:
-        """合成语音，返回 WAV 字节。"""
+        """合成语音，返回 WAV 字节。失败时抛出 RuntimeError。"""
         ...
 
 
@@ -51,6 +54,9 @@ class IndexTTSClient(BaseTTSClient):
         base_url: str = DEFAULT_API_URL,
         timeout: dict[str, int] | None = None,
     ):
+        base_url = base_url.strip()
+        if not base_url:
+            raise ValueError("TTS API URL 不能为空，请在设置中配置")
         self.base_url = base_url.rstrip("/")
         self.timeout = {**DEFAULT_TIMEOUT, **(timeout or {})}
 
@@ -78,7 +84,17 @@ class IndexTTSClient(BaseTTSClient):
             params={"file_name": file_name},
             timeout=self.timeout["check"],
         )
-        return resp.json().get("exists", False)
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"检查音频失败 [{resp.status_code}]: {resp.text[:200]}"
+            )
+        try:
+            data = resp.json()
+        except requests.exceptions.JSONDecodeError as e:
+            raise RuntimeError(
+                f"检查音频返回非 JSON: {resp.text[:200]}"
+            ) from e
+        return data.get("exists", False)
 
     def upload_audio(self, file_path: str) -> dict:
         file_name = os.path.basename(file_path)
@@ -89,7 +105,16 @@ class IndexTTSClient(BaseTTSClient):
                 data={"full_path": file_name},
                 timeout=self.timeout["upload"],
             )
-        return resp.json()
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"上传音频失败 [{resp.status_code}]: {resp.text[:200]}"
+            )
+        try:
+            return resp.json()
+        except requests.exceptions.JSONDecodeError as e:
+            raise RuntimeError(
+                f"上传音频返回非 JSON: {resp.text[:200]}"
+            ) from e
 
     def synthesize(
         self, text: str, audio_name: str, emo_text: str | None = None
@@ -141,6 +166,8 @@ def create_client(
         raise ValueError(
             f"未知的 TTS provider: {provider}，可用: {list(FACTORY.keys())}"
         )
+    if not api_url or not api_url.strip():
+        raise ValueError("API URL 不能为空，请在设置中配置 TTS API 地址")
     return FACTORY[provider](base_url=api_url, timeout=timeout, **kwargs)
 
 
