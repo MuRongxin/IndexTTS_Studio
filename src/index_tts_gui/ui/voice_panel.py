@@ -29,6 +29,7 @@ class _AudioListItem(QWidget):
     def __init__(self, path: str, name: str, parent=None):
         super().__init__(parent)
         self._path = path
+        self.setAcceptDrops(True)  # 允许拖放事件到达自定义项
         row = QHBoxLayout(self)
         row.setContentsMargins(10, 8, 10, 8)
         row.setSpacing(8)
@@ -304,8 +305,13 @@ class VoicePanel(QWidget):
         self._player.errorOccurred.connect(self._on_play_error)
 
     def eventFilter(self, obj, event):
-        """拦截参考音频列表及其自定义项的拖放和双击事件。"""
-        if obj is self._audio_list_widget or isinstance(obj, _AudioListItem):
+        """拦截参考音频列表、视口及自定义项的拖放和双击事件。"""
+        is_list_area = (
+            obj is self._audio_list_widget
+            or obj is self._audio_list_widget.viewport()
+            or isinstance(obj, _AudioListItem)
+        )
+        if is_list_area:
             if event.type() == QEvent.DragEnter:
                 self._drag_enter(event)
                 return True
