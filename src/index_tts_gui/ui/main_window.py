@@ -415,6 +415,8 @@ class MainWindow(QMainWindow):
     def _on_merge_done(self, entries: list):
         """合并完成后加载字幕并跳转到字幕页。"""
         self.subtitle_panel.load_entries(entries)
+        self._project.subtitles = [e.__dict__ for e in entries]
+        self._project.save()
         self._set_current_page(2)
         self.status_bar.showMessage(f"字幕已生成并加载: {len(entries)} 条")
 

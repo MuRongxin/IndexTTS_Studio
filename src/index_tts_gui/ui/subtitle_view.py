@@ -341,22 +341,52 @@ class SubtitlePanel(QWidget):
     # ── 音频 ──
 
     def _refresh_project_audio(self):
-        """切换工程后自动尝试加载 full_dub.wav"""
+        """切换工程后仅检测 full_dub.wav 是否存在，避免大文件阻塞主线程。"""
         self._stop()
         self._audio_path = ""
         self._audio_engine.clear()
         self._timeline.set_audio_engine(None)
+        self._player.setSource(QUrl())
 
         output_dir = self._output_dir()
         auto_path = os.path.join(output_dir, "full_dub.wav")
         if os.path.exists(auto_path):
-            self._load_audio_path(auto_path)
+            # 不自动加载波形，避免大工程卡顿；用户可手动点击「加载音频」
+            self._btn_load_audio.setText(f"📂 {os.path.basename(auto_path)} (点击加载)")
+            self._btn_load_audio.setToolTip(f"{auto_path}\n点击加载音频波形")
         else:
             self._btn_load_audio.setText("📂 加载音频")
-            self._update_time_label(0, 0)
-            self._seek.setEnabled(False)
-            self._btn_play.setEnabled(False)
-            self._btn_stop.setEnabled(False)
+            self._btn_load_audio.setToolTip("")
+        self._update_time_label(0, 0)
+        self._seek.setEnabled(False)
+        self._btn_play.setEnabled(False)
+        self._btn_stop.setEnabled(False)
+
+    def _load_saved_subtitles(self):
+        """优先从 project.json 中加载已保存的字幕；没有则尝试后台重建。"""
+        if self._project is None:
+            return
+        saved = getattr(self._project, "subtitles", None)
+        if saved:
+            try:
+                entries = [SubtitleEntry(**item) for item in saved]
+                self.load_entries(entries, auto_load_audio=False)
+                self._log_status.emit(f"已加载保存的字幕: {len(entries)} 条")
+                return
+            except Exception as e:
+                logger.warning("加载保存的字幕失败: %s", e)
+        self._try_auto_load_subtitles()
+
+    def _save_subtitles_to_project(self):
+        """将当前字幕保存到 project.json。"""
+        if self._project is None or self._track is None:
+            return
+        entries = self._track.to_entries()
+        self._project.subtitles = [e.__dict__ for e in entries]
+        try:
+            self._project.save()
+        except Exception as e:
+            logger.error("保存字幕到工程失败: %s", e)
 
     def _try_auto_load_subtitles(self):
         """打开工程后后台自动从已有 WAV 重建字幕。"""
@@ -552,7 +582,7 @@ class SubtitlePanel(QWidget):
         self._timeline.set_playhead(0)
         self.refresh_table()
         self._refresh_project_audio()
-        self._try_auto_load_subtitles()
+        self._load_saved_subtitles()
         self._update_button_states()
 
     def reset_for_new_project(self):
@@ -581,15 +611,15 @@ class SubtitlePanel(QWidget):
             return self._project.output_dir
         return "output_tts"
 
-    def load_entries(self, entries: List[SubtitleEntry]):
-        """载入字幕条目（与合成流水线兼容），并刷新 full_dub.wav 音频。"""
+    def load_entries(self, entries: List[SubtitleEntry], auto_load_audio: bool = True):
+        """载入字幕条目（与合成流水线兼容），并可选刷新 full_dub.wav 音频。"""
         self._track = SubtitleTrack.from_entries(entries)
         self._undo_stack.clear()
         self._timeline.set_subtitle_track(self._track)
 
-        # 合并完成后 full_dub.wav 可能被覆盖，强制重新加载以同步波形和播放器
         full_dub = os.path.join(self._output_dir(), "full_dub.wav")
-        if os.path.exists(full_dub):
+        if auto_load_audio and os.path.exists(full_dub):
+            # 合并完成后 full_dub.wav 可能被覆盖，强制重新加载以同步波形和播放器
             self._load_audio_path(full_dub)
         elif self._audio_engine.is_loaded():
             self._timeline.set_duration(self._audio_engine.duration)
@@ -770,11 +800,12 @@ class SubtitlePanel(QWidget):
     # ── 撤销 ──
 
     def _push_undo(self):
-        """保存当前字幕状态到撤销栈。"""
+        """保存当前字幕状态到撤销栈，并持久化到 project.json。"""
         snapshot = self._track.to_entries()
         self._undo_stack.append(snapshot)
         if len(self._undo_stack) > self._undo_max:
             self._undo_stack.pop(0)
+        self._save_subtitles_to_project()
 
     def _undo(self):
         """撤销到上一个状态。"""
@@ -788,6 +819,7 @@ class SubtitlePanel(QWidget):
         self._timeline.set_subtitle_track(self._track)
         self._update_info_label()
         self._update_button_states()
+        self._save_subtitles_to_project()
 
     def _maybe_push_text_undo(self):
         """如果当前编辑的字幕文本已变更，保存撤销点。"""

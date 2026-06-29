@@ -40,6 +40,7 @@ class Project:
         pauses: list[float] | None = None,
         audio_list: list[dict] | None = None,
         wav_map: list[dict] | None = None,
+        subtitles: list[dict] | None = None,
         created_at: str | None = None,
         updated_at: str | None = None,
     ):
@@ -51,6 +52,7 @@ class Project:
         self.pauses = list(pauses) if pauses else []
         self.audio_list: list[dict] = list(audio_list) if audio_list else []
         self.wav_map: list[dict] = list(wav_map) if wav_map else []
+        self.subtitles: list[dict] = list(subtitles) if subtitles else []
         self.created_at = created_at or datetime.now().isoformat()
         self.updated_at = updated_at or datetime.now().isoformat()
 
@@ -83,6 +85,7 @@ class Project:
             "audio_list": self.audio_list,
             "wav_map": self.wav_map,
             "pauses": self.pauses,
+            "subtitles": self.subtitles,
         }
         tmp_path = self.project_file_path + ".tmp"
         try:
@@ -116,6 +119,7 @@ class Project:
                 audio_list=data.get("audio_list", []),
                 wav_map=data.get("wav_map", []),
                 pauses=data.get("pauses", []),
+                subtitles=data.get("subtitles", []),
                 created_at=data.get("created_at"),
                 updated_at=data.get("updated_at"),
             )
