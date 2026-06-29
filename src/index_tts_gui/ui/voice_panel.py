@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QFileDialog, QFrame, QMessageBox,
     QListWidget, QListWidgetItem, QAbstractItemView,
+    QSlider,
 )
 from PySide6.QtCore import Qt, QSize, Signal, QUrl, QEvent
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
@@ -63,6 +64,7 @@ class VoicePanel(QWidget):
 
     audio_uploaded = Signal(str)  # 上传成功后发射音频名
     segment_regenerate = Signal(int)  # 请求重新合成某句（index）
+    voice_log = Signal(str)       # 日志消息（转发到合成面板）
 
     def __init__(self, project: Project, client: BaseTTSClient | None = None):
         super().__init__()
@@ -80,6 +82,7 @@ class VoicePanel(QWidget):
         self._player = QMediaPlayer()
         self._audio_output = QAudioOutput()
         self._player.setAudioOutput(self._audio_output)
+        self._selected_segment_index = -1
 
         self._setup_ui()
         self._load_default_audio()
@@ -151,17 +154,21 @@ class VoicePanel(QWidget):
         hint_label.setStyleSheet("font-weight: bold; color: #555;")
         layout.addWidget(hint_label)
 
-        # 左右分栏
+        # 左右分栏：每个列表下方有自己的变速控件
         lists_row = QHBoxLayout()
         lists_row.setSpacing(8)
 
-        # 左半边：参考音频列表（接受拖放）
+        # 左侧：参考音频列表 + 变速面板
+        ref_col = QVBoxLayout()
+        ref_col.setSpacing(4)
+
         self._audio_list_widget = QListWidget()
         self._audio_list_widget.setAcceptDrops(True)
         self._audio_list_widget.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
         self._audio_list_widget.setAlternatingRowColors(True)
         self._audio_list_widget.setSelectionMode(QAbstractItemView.SingleSelection)
         self._audio_list_widget.currentRowChanged.connect(self._on_audio_list_selected)
+        self._audio_list_widget.itemPressed.connect(self._on_audio_item_clicked)
         self._audio_list_widget.setStyleSheet("""
             QListWidget {
                 border: 2px dashed #bbb;
@@ -178,9 +185,40 @@ class VoicePanel(QWidget):
             }
         """)
         self._audio_list_widget.installEventFilter(self)
-        lists_row.addWidget(self._audio_list_widget, 1)
+        ref_col.addWidget(self._audio_list_widget, 1)
 
-        # 右半边：合成片段列表（由 synthesis_panel 填充）
+        self._ref_speed_panel = QFrame()
+        self._ref_speed_panel.setVisible(False)
+        ref_speed_layout = QHBoxLayout(self._ref_speed_panel)
+        ref_speed_layout.setContentsMargins(0, 0, 0, 0)
+        ref_speed_layout.setSpacing(8)
+        ref_speed_layout.addWidget(QLabel("速度:"))
+        self._ref_speed_slider = QSlider(Qt.Horizontal)
+        self._ref_speed_slider.setRange(50, 200)
+        self._ref_speed_slider.setValue(100)
+        self._ref_speed_slider.setFixedWidth(150)
+        self._ref_speed_label = QLabel("1.0x")
+        self._ref_speed_label.setFixedWidth(40)
+        self._ref_speed_slider.valueChanged.connect(
+            lambda v: self._ref_speed_label.setText(f"{v/100:.1f}x"))
+        ref_speed_layout.addWidget(self._ref_speed_slider)
+        ref_speed_layout.addWidget(self._ref_speed_label)
+        self._ref_speed_btn = QPushButton("应用并生成新音频")
+        self._ref_speed_btn.setStyleSheet("""
+            QPushButton { background: #2196f3; color: white; padding: 4px 12px; border-radius: 4px; }
+            QPushButton:hover { background: #1976d2; }
+        """)
+        self._ref_speed_btn.clicked.connect(self._apply_speed_to_reference)
+        ref_speed_layout.addWidget(self._ref_speed_btn)
+        ref_speed_layout.addStretch()
+        ref_col.addWidget(self._ref_speed_panel)
+
+        lists_row.addLayout(ref_col, 1)
+
+        # 右侧：合成片段列表 + 变速面板
+        seg_col = QVBoxLayout()
+        seg_col.setSpacing(4)
+
         self._segment_list_widget = QListWidget()
         self._segment_list_widget.setAlternatingRowColors(True)
         self._segment_list_widget.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -201,7 +239,35 @@ class VoicePanel(QWidget):
                 color: #333;
             }
         """)
-        lists_row.addWidget(self._segment_list_widget, 1)
+        seg_col.addWidget(self._segment_list_widget, 1)
+
+        self._seg_speed_panel = QFrame()
+        self._seg_speed_panel.setVisible(False)
+        seg_speed_layout = QHBoxLayout(self._seg_speed_panel)
+        seg_speed_layout.setContentsMargins(0, 0, 0, 0)
+        seg_speed_layout.setSpacing(8)
+        seg_speed_layout.addWidget(QLabel("速度:"))
+        self._seg_speed_slider = QSlider(Qt.Horizontal)
+        self._seg_speed_slider.setRange(50, 200)
+        self._seg_speed_slider.setValue(100)
+        self._seg_speed_slider.setFixedWidth(150)
+        self._seg_speed_label = QLabel("1.0x")
+        self._seg_speed_label.setFixedWidth(40)
+        self._seg_speed_slider.valueChanged.connect(
+            lambda v: self._seg_speed_label.setText(f"{v/100:.1f}x"))
+        seg_speed_layout.addWidget(self._seg_speed_slider)
+        seg_speed_layout.addWidget(self._seg_speed_label)
+        self._seg_speed_btn = QPushButton("应用并替换原文件")
+        self._seg_speed_btn.setStyleSheet("""
+            QPushButton { background: #ff9800; color: white; padding: 4px 12px; border-radius: 4px; }
+            QPushButton:hover { background: #f57c00; }
+        """)
+        self._seg_speed_btn.clicked.connect(self._apply_speed_to_segment)
+        seg_speed_layout.addWidget(self._seg_speed_btn)
+        seg_speed_layout.addStretch()
+        seg_col.addWidget(self._seg_speed_panel)
+
+        lists_row.addLayout(seg_col, 1)
 
         layout.addLayout(lists_row)
 
@@ -312,14 +378,21 @@ class VoicePanel(QWidget):
         self._insert_audio_list_item(path, name)
         self._audio_list_widget.setCurrentRow(self._audio_list_widget.count() - 1)
 
+    def _on_audio_item_clicked(self, item: QListWidgetItem):
+        """点击列表项任意位置（含内联按钮）时确保选中并显示变速面板。"""
+        row = self._audio_list_widget.row(item)
+        self._audio_list_widget.setCurrentRow(row)
+
     def _on_audio_list_selected(self, row: int):
         """列表项被选中时切换音频。"""
         if row < 0:
+            self._hide_speed_panels()
             return
         item = self._audio_list_widget.item(row)
         path = item.data(Qt.UserRole)
         if path and path != self._audio_path:
             self._load_audio_from_list(path)
+        self._show_speed_panel_for_reference()
 
     def _load_audio_from_list(self, path: str):
         """从列表加载音频（不重复加入列表）。"""
@@ -395,6 +468,79 @@ class VoicePanel(QWidget):
         if path == self._audio_path:
             self._audio_list_widget.setCurrentItem(item)
 
+    # ── 变速控制 ──
+
+    def _show_speed_panel_for_reference(self):
+        self._ref_speed_panel.setVisible(True)
+        self._ref_speed_slider.setValue(100)
+        self._seg_speed_panel.setVisible(False)
+
+    def _show_speed_panel_for_segment(self):
+        self._seg_speed_panel.setVisible(True)
+        self._seg_speed_slider.setValue(100)
+        self._ref_speed_panel.setVisible(False)
+
+    def _hide_speed_panels(self):
+        self._ref_speed_panel.setVisible(False)
+        self._seg_speed_panel.setVisible(False)
+
+    def _apply_speed_to_reference(self):
+        """对选中的参考音频变速，生成新文件加入列表。"""
+        if not self._audio_path:
+            return
+        rate = self._ref_speed_slider.value() / 100.0
+        if abs(rate - 1.0) < 0.01:
+            return  # 1.0x 不处理
+        from index_tts_gui.core.audio_speed import change_audio_speed
+        base = os.path.splitext(self._audio_path)[0]
+        out_path = f"{base}_{rate:.1f}x.wav"
+        try:
+            change_audio_speed(self._audio_path, out_path, rate)
+            self._load_audio(out_path)
+            self._log_msg(f"✅ 变速完成: {os.path.basename(out_path)} ({rate:.1f}x)")
+        except RuntimeError as e:
+            self._log_msg(f"✗ 变速失败: {e}")
+
+    def _apply_speed_to_segment(self):
+        """对选中的生成片段变速，直接覆盖原文件。"""
+        if self._selected_segment_index < 0 or not self._project:
+            return
+        rate = self._seg_speed_slider.value() / 100.0
+        if abs(rate - 1.0) < 0.01:
+            return
+        output_dir = self._project.output_dir
+        # 查找对应 WAV
+        target = None
+        for f in os.listdir(output_dir):
+            if f.startswith(f"sentence_{self._selected_segment_index + 1:02d}_") and f.endswith(".wav"):
+                target = os.path.join(output_dir, f)
+                break
+        if not target:
+            self._log_msg(f"⚠ 未找到第 {self._selected_segment_index + 1} 句的音频文件")
+            return
+        from index_tts_gui.core.audio_speed import change_audio_speed
+        import tempfile
+        try:
+            # ffmpeg 不能直接输入输出同一文件，先写入临时文件再替换
+            fd, tmp_path = tempfile.mkstemp(suffix=".wav", prefix="speed_", dir=output_dir)
+            os.close(fd)
+            try:
+                change_audio_speed(target, tmp_path, rate)
+                os.replace(tmp_path, target)
+            except Exception:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                raise
+            self._log_msg(f"✅ 片段变速完成: {os.path.basename(target)} ({rate:.1f}x)")
+        except RuntimeError as e:
+            self._log_msg(f"✗ 变速失败: {e}")
+
+    def _log_msg(self, msg: str):
+        """发送日志到合成面板。"""
+        self.voice_log.emit(msg)
+
+    # ── 列表项操作 ──
+
     def _on_item_play(self, path: str):
         """列表项试听按钮：加载并播放。"""
         if path == self._audio_path:
@@ -428,7 +574,12 @@ class VoicePanel(QWidget):
         """片段选中变化时，通知外部更新按钮状态。"""
         item = self._segment_list_widget.currentItem()
         if item:
-            self.segment_regenerate.emit(item.data(Qt.UserRole))
+            self._selected_segment_index = item.data(Qt.UserRole)
+            self.segment_regenerate.emit(self._selected_segment_index)
+            self._show_speed_panel_for_segment()
+        else:
+            self._selected_segment_index = -1
+            self._hide_speed_panels()
 
     segment_preview = Signal(str)  # 请求预览某句（wav_path）
 

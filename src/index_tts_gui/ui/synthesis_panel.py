@@ -92,6 +92,7 @@ class SynthesisPanel(QWidget):
         self._voice_panel.audio_uploaded.connect(self.set_audio_name)
         self._voice_panel.segment_regenerate.connect(self._on_segment_regenerate_request)
         self._voice_panel.segment_preview.connect(self._preview_wav)
+        self._voice_panel.voice_log.connect(self._log_msg)
 
         self._setup_ui()
         # 从工程恢复状态（兜底：sentences_ready 信号可能在构造时尚未连接）
