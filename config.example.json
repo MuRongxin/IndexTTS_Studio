@@ -8,6 +8,7 @@
   },
   "window_geometry": "",
   "window_state": "",
+  "last_project_dir": "",
   "llm": {
     "enabled": true,
     "preset": "deepseek",

@@ -36,8 +36,7 @@ class MainWindow(QMainWindow):
 
         self._client: BaseTTSClient | None = None
         self._load_config()
-        # 创建/加载默认工程
-        self._project = Project.create_default(os.getcwd())
+        self._project = self._load_last_project()
         logger.info("加载工程: %s", self._project.to_dict())
         self._setup_central()
         self._setup_statusbar()
@@ -56,6 +55,7 @@ class MainWindow(QMainWindow):
             "timeout": dict(DEFAULT_TIMEOUT),
             "window_geometry": "",
             "window_state": "",
+            "last_project_dir": "",
             "llm": {
                 "enabled": True,
                 "preset": "deepseek",
@@ -87,6 +87,26 @@ class MainWindow(QMainWindow):
                     self._validate_llm_config()
             except Exception:
                 pass
+
+    def _load_last_project(self) -> Project:
+        """加载上一次使用的工程；不存在或无效时回退到默认工程。"""
+        last_dir = self._config.get("last_project_dir", "")
+        if last_dir and os.path.isdir(last_dir):
+            loaded = Project.load(last_dir)
+            if loaded is not None:
+                logger.info("加载上次工程: %s", last_dir)
+                return loaded
+            logger.warning("上次工程加载失败，回退默认工程: %s", last_dir)
+        return Project.create_default(os.getcwd())
+
+    def _save_last_project_dir(self):
+        """将当前工程目录保存到配置。"""
+        if self._project is None:
+            return
+        current = self._project.project_dir
+        if self._config.get("last_project_dir") != current:
+            self._config["last_project_dir"] = current
+            self._save_config()
 
     def _validate_llm_config(self):
         """校验并修正 LLM 配置中的无效模型名。"""
@@ -384,6 +404,7 @@ class MainWindow(QMainWindow):
             self.subtitle_panel.reset_for_new_project()
 
         self._update_project_label()
+        self._save_last_project_dir()
 
     def _on_synthesis_done(self, output_dir: str):
         """合成完成后更新状态，由用户手动点击合并生成完整音频和字幕。"""
@@ -399,6 +420,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._save_window_state()
+        self._save_last_project_dir()
         if hasattr(self, "_project"):
             self._project.save()
             logger.info("工程已保存: %s", self._project.project_dir)
