@@ -7,7 +7,6 @@ import os
 import re
 import subprocess
 import tempfile
-from urllib.parse import quote
 
 from index_tts_gui.core.pause_rules import compute_pauses
 
@@ -92,8 +91,9 @@ def merge_wavs(wav_paths: list[str], output_path: str):
         with os.fdopen(fd, "w") as f:
             for p in wav_paths:
                 abs_path = os.path.abspath(p)
-                safe_path = quote(abs_path, safe="/")
-                f.write(f"file 'file://{safe_path}'\n")
+                # 转义单引号：' -> '\''，确保 concat 文件格式安全
+                safe_path = abs_path.replace("'", "'\\''")
+                f.write(f"file '{safe_path}'\n")
 
         subprocess.run(
             [
