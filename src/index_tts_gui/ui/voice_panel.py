@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QLabel, QFileDialog, QFrame, QMessageBox,
     QListWidget, QListWidgetItem, QAbstractItemView,
 )
-from PySide6.QtCore import Qt, QSize, Signal, QUrl
+from PySide6.QtCore import Qt, QSize, Signal, QUrl, QEvent
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 
@@ -86,7 +86,12 @@ class VoicePanel(QWidget):
         self._restore_from_project()
 
     def _load_default_audio(self):
-        """启动时默认加载项目目录下的参考音频。"""
+        """启动时默认加载根目录参考音频，不存在则加载项目目录下第一个 WAV。"""
+        default = os.path.join(os.getcwd(), "作为愚人众的十一执行官.wav")
+        if os.path.exists(default):
+            self._load_audio(default)
+            return
+
         if not self._project:
             return
         project_dir = self._project.project_dir
@@ -152,6 +157,7 @@ class VoicePanel(QWidget):
         # 左半边：参考音频列表（接受拖放）
         self._audio_list_widget = QListWidget()
         self._audio_list_widget.setAcceptDrops(True)
+        self._audio_list_widget.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
         self._audio_list_widget.setAlternatingRowColors(True)
         self._audio_list_widget.setSelectionMode(QAbstractItemView.SingleSelection)
         self._audio_list_widget.currentRowChanged.connect(self._on_audio_list_selected)
@@ -170,8 +176,7 @@ class VoicePanel(QWidget):
                 color: white;
             }
         """)
-        self._audio_list_widget.dragEnterEvent = self._drag_enter
-        self._audio_list_widget.dropEvent = self._drop_event
+        self._audio_list_widget.installEventFilter(self)
         lists_row.addWidget(self._audio_list_widget, 1)
 
         # 右半边：合成片段列表（由 synthesis_panel 填充）
@@ -236,13 +241,29 @@ class VoicePanel(QWidget):
         self._player.playbackStateChanged.connect(self._on_playback_changed)
         self._player.errorOccurred.connect(self._on_play_error)
 
+    def eventFilter(self, obj, event):
+        """拦截参考音频列表的拖放和双击事件。"""
+        if obj is self._audio_list_widget:
+            if event.type() == QEvent.DragEnter:
+                self._drag_enter(event)
+                return True
+            elif event.type() == QEvent.Drop:
+                self._drop_event(event)
+                return True
+            elif event.type() == QEvent.MouseButtonDblClick:
+                self._browse()
+                return True
+        return super().eventFilter(obj, event)
+
     def _drag_enter(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
             urls = event.mimeData().urls()
             if urls and all(u.toLocalFile().lower().endswith('.wav') for u in urls):
                 event.acceptProposedAction()
+                event.accept()
 
     def _drop_event(self, event: QDropEvent):
+        event.acceptProposedAction()
         for url in event.mimeData().urls():
             path = url.toLocalFile()
             if path.lower().endswith('.wav'):
