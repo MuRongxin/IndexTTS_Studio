@@ -304,8 +304,8 @@ class VoicePanel(QWidget):
         self._player.errorOccurred.connect(self._on_play_error)
 
     def eventFilter(self, obj, event):
-        """拦截参考音频列表的拖放和双击事件。"""
-        if obj is self._audio_list_widget:
+        """拦截参考音频列表及其自定义项的拖放和双击事件。"""
+        if obj is self._audio_list_widget or isinstance(obj, _AudioListItem):
             if event.type() == QEvent.DragEnter:
                 self._drag_enter(event)
                 return True
@@ -458,6 +458,7 @@ class VoicePanel(QWidget):
         widget.play_clicked.connect(self._on_item_play)
         widget.upload_clicked.connect(self._on_item_upload)
         widget.remove_clicked.connect(self._on_item_remove)
+        widget.installEventFilter(self)
 
         item = QListWidgetItem()
         item.setData(Qt.UserRole, path)
@@ -597,8 +598,10 @@ class VoicePanel(QWidget):
                 return
 
     def preview_segment(self, wav_path: str):
-        """预览合成片段音频。"""
+        """预览合成片段音频。强制清空 source 避免 QMediaPlayer 缓存旧文件。"""
         if os.path.exists(wav_path):
+            self._player.stop()
+            self._player.setSource(QUrl())
             self._player.setSource(QUrl.fromLocalFile(wav_path))
             self._player.play()
 
