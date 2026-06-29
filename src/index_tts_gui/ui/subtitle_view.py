@@ -391,6 +391,10 @@ class SubtitlePanel(QWidget):
         except Exception as e:
             logger.error("保存字幕到工程失败: %s", e)
 
+    def save_subtitles(self):
+        """公共入口：保存当前字幕到 project.json。"""
+        self._save_subtitles_to_project()
+
     def _try_auto_load_subtitles(self):
         """打开工程后后台自动从已有 WAV 重建字幕。"""
         if not self._project or not self._project.sentences:
@@ -415,10 +419,18 @@ class SubtitlePanel(QWidget):
 
     def _load_audio_path(self, path: str):
         """加载音频：播放器立即设置，波形在后台线程加载并打印日志。"""
+        # 如果已经在加载同一个文件，避免重复启动
+        if (
+            self._audio_path == path
+            and self._audio_load_worker is not None
+        ):
+            return
+
         self._audio_path = path
         self._player.setSource(QUrl.fromLocalFile(path))
 
-        # 停止并清理旧 worker
+        # 停止并清理旧 worker：断开信号后 deleteLater，立即清空引用，
+        # 避免访问已经被 C++ 删除的内部对象。
         if self._audio_load_worker is not None:
             try:
                 self._audio_load_worker.loaded.disconnect()
@@ -432,9 +444,8 @@ class SubtitlePanel(QWidget):
                 self._audio_load_worker.finished.disconnect()
             except Exception:
                 pass
-            if not self._audio_load_worker.isFinished():
-                self._audio_load_worker.wait(1000)
             self._audio_load_worker.deleteLater()
+            self._audio_load_worker = None
 
         # 先清空旧波形，UI 进入加载状态
         self._audio_engine.clear()
@@ -446,8 +457,12 @@ class SubtitlePanel(QWidget):
         self._audio_load_worker = AudioLoadWorker(path)
         self._audio_load_worker.loaded.connect(self._on_audio_loaded)
         self._audio_load_worker.failed.connect(self._on_audio_load_failed)
-        self._audio_load_worker.finished.connect(self._audio_load_worker.deleteLater)
+        self._audio_load_worker.finished.connect(self._on_audio_load_finished)
         self._audio_load_worker.start()
+
+    def _on_audio_load_finished(self):
+        """worker 生命周期结束，清空引用，不访问其成员。"""
+        self._audio_load_worker = None
 
     def _on_audio_loaded(
         self,
@@ -1178,7 +1193,8 @@ class SubtitlePanel(QWidget):
         if expected_dir and expected_dir != current_dir:
             # 工程已切换，丢弃旧结果
             return
-        self.load_entries(entries)
+        self.load_entries(entries, auto_load_audio=False)
+        self._save_subtitles_to_project()
 
     def _on_regen_error(self, msg: str):
         from PySide6.QtWidgets import QMessageBox

@@ -387,7 +387,9 @@ class MainWindow(QMainWindow):
 
     def _switch_project(self, project: Project, is_new: bool = False):
         """切换当前工程并刷新所有面板。"""
-        # 先保存旧工程
+        # 先保存旧工程字幕与状态
+        if hasattr(self, "subtitle_panel") and self.subtitle_panel:
+            self.subtitle_panel.save_subtitles()
         if hasattr(self, "_project") and self._project:
             self._project.save()
         self._project = project
@@ -423,6 +425,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._save_window_state()
         self._save_last_project_dir()
+        if hasattr(self, "subtitle_panel"):
+            self.subtitle_panel.save_subtitles()
         if hasattr(self, "_project"):
             self._project.save()
             logger.info("工程已保存: %s", self._project.project_dir)
