@@ -90,6 +90,8 @@ class VoicePanel(QWidget):
         default = os.path.join(os.getcwd(), "作为愚人众的十一执行官.wav")
         if os.path.exists(default):
             self._load_audio(default)
+            self._project.audio_name = os.path.basename(default)
+            self._project.save()
             return
 
         if not self._project:
@@ -137,7 +139,6 @@ class VoicePanel(QWidget):
         # 文件找不到时，清空路径并禁用上传，避免上传旧文件
         self._audio_path = ""
         self._audio_name = stored_name
-        self._file_label.setText(f"📁 {stored_name} (文件缺失)")
         self._btn_play.setEnabled(False)
         self._btn_upload.setEnabled(False)
 
@@ -203,16 +204,6 @@ class VoicePanel(QWidget):
         lists_row.addWidget(self._segment_list_widget, 1)
 
         layout.addLayout(lists_row)
-
-        # 当前选择信息
-        info_row = QHBoxLayout()
-        self._file_label = QLabel("未选择音频")
-        self._file_label.setStyleSheet("font-weight: bold; color: #333;")
-        info_row.addWidget(self._file_label, 1)
-        self._play_status = QLabel("")
-        self._play_status.setStyleSheet("color: #666; font-size: 12px;")
-        info_row.addWidget(self._play_status)
-        layout.addLayout(info_row)
 
         # 隐藏的试听按钮（保持兼容，实际试听由列表内联按钮触发）
         self._btn_play = QPushButton()
@@ -281,7 +272,6 @@ class VoicePanel(QWidget):
             return
         self._audio_path = path
         self._audio_name = os.path.basename(path)
-        self._file_label.setText(f"📁 {self._audio_name}")
         self._btn_play.setEnabled(True)
         self._btn_upload.setEnabled(True)
         self._upload_status.setText("")
@@ -295,14 +285,22 @@ class VoicePanel(QWidget):
     # ── 参考音频列表管理 ──
 
     def _add_to_audio_list(self, path: str, name: str):
-        """将音频加入列表（去重），同步到工程。"""
-        # 去重：检查路径
-        for entry in self._project.audio_list:
-            if entry.get("path") == path:
-                for i in range(self._audio_list_widget.count()):
-                    if self._audio_list_widget.item(i).data(Qt.UserRole) == path:
-                        self._audio_list_widget.setCurrentRow(i)
+        """将音频加入列表（按文件名去重），同步到工程。"""
+        # 去重：按文件名判断
+        for i, entry in enumerate(self._project.audio_list):
+            if entry.get("name") == name:
+                # 同名但路径不同，更新为最新路径
+                if entry.get("path") != path:
+                    self._project.audio_list[i] = {"path": path, "name": name}
+                    self._project.save()
+                    self._refresh_audio_list_ui()
+                for row in range(self._audio_list_widget.count()):
+                    if self._audio_list_widget.item(row).data(Qt.UserRole) == path:
+                        self._audio_list_widget.setCurrentRow(row)
                         return
+                # 列表 UI 与数据不一致，刷新后重试
+                self._refresh_audio_list_ui()
+                return
         # 添加新条目
         self._project.audio_list.append({"path": path, "name": name})
         self._project.save()
@@ -326,7 +324,6 @@ class VoicePanel(QWidget):
             return
         self._audio_path = path
         self._audio_name = os.path.basename(path)
-        self._file_label.setText(f"📁 {self._audio_name}")
         self._btn_play.setEnabled(True)
         self._btn_upload.setEnabled(True)
         self._upload_status.setText("")
@@ -360,7 +357,6 @@ class VoicePanel(QWidget):
         if self._audio_path == path:
             self._audio_path = ""
             self._audio_name = ""
-            self._file_label.setText("未选择音频")
             self._btn_play.setEnabled(False)
             self._btn_upload.setEnabled(False)
             self._upload_status.setText("")
@@ -537,7 +533,6 @@ class VoicePanel(QWidget):
         """新建工程时清空已选音频状态（不删除项目默认音频文件）。"""
         self._audio_path = ""
         self._audio_name = ""
-        self._file_label.setText("未选择音频")
         self._btn_play.setEnabled(False)
         self._btn_upload.setEnabled(False)
         self._upload_status.setText("")
