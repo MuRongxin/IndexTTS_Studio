@@ -38,6 +38,7 @@ class Project:
         sentences: list[str] | None = None,
         audio_name: str = "",
         pauses: list[float] | None = None,
+        pauses_for_sentences: list[str] | None = None,
         audio_list: list[dict] | None = None,
         wav_map: list[dict] | None = None,
         subtitles: list[dict] | None = None,
@@ -50,6 +51,7 @@ class Project:
         self.sentences = list(sentences) if sentences else []
         self.audio_name = audio_name
         self.pauses = list(pauses) if pauses else []
+        self.pauses_for_sentences: list[str] = list(pauses_for_sentences) if pauses_for_sentences else []
         self.audio_list: list[dict] = list(audio_list) if audio_list else []
         self.wav_map: list[dict] = list(wav_map) if wav_map else []
         self.subtitles: list[dict] = list(subtitles) if subtitles else []
@@ -85,6 +87,7 @@ class Project:
             "audio_list": self.audio_list,
             "wav_map": self.wav_map,
             "pauses": self.pauses,
+            "pauses_for_sentences": self.pauses_for_sentences,
             "subtitles": self.subtitles,
         }
         tmp_path = self.project_file_path + ".tmp"
@@ -119,6 +122,7 @@ class Project:
                 audio_list=data.get("audio_list", []),
                 wav_map=data.get("wav_map", []),
                 pauses=data.get("pauses", []),
+                pauses_for_sentences=data.get("pauses_for_sentences", []),
                 subtitles=data.get("subtitles", []),
                 created_at=data.get("created_at"),
                 updated_at=data.get("updated_at"),

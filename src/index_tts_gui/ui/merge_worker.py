@@ -30,11 +30,13 @@ class MergeWorker(QThread):
         sentences: list[str],
         output_dir: str,
         llm_cfg: dict,
+        pauses: list[float] | None = None,
     ):
         super().__init__()
         self._sentences = sentences
         self._output_dir = output_dir
         self._llm_cfg = llm_cfg or {}
+        self._provided_pauses = pauses
         self._canceled = False
         self._process: subprocess.Popen | None = None
         self.pauses: list[float] = []
@@ -104,6 +106,10 @@ class MergeWorker(QThread):
         self.finished.emit(entries)
 
     def _resolve_pauses(self) -> list[float]:
+        if self._provided_pauses is not None and len(self._provided_pauses) == len(self._sentences):
+            self.log.emit("📐 使用已保存的停顿建议")
+            return list(self._provided_pauses)
+
         service = LLMService(self._llm_cfg)
 
         if service.is_configured():

@@ -174,6 +174,20 @@ class SynthesisPanel(QWidget):
         self._btn_merge.clicked.connect(self._merge_full_audio)
         ctrl.addWidget(self._btn_merge)
 
+        self._btn_refresh_pauses = QPushButton("🔄 重新获取停顿")
+        self._btn_refresh_pauses.setToolTip("清空已保存的停顿建议，重新询问 LLM")
+        self._btn_refresh_pauses.setStyleSheet("""
+            QPushButton {
+                background: #7e57c2; color: white;
+                padding: 10px 24px; border-radius: 6px;
+                font-size: 14px; font-weight: bold;
+            }
+            QPushButton:hover { background: #5e35b1; }
+            QPushButton:disabled { background: #ccc; }
+        """)
+        self._btn_refresh_pauses.clicked.connect(self._refresh_pauses)
+        ctrl.addWidget(self._btn_refresh_pauses)
+
         self._btn_clear_output = QPushButton("🗑 清空输出")
         self._btn_clear_output.setStyleSheet("""
             QPushButton {
@@ -246,10 +260,11 @@ class SynthesisPanel(QWidget):
         self._llm_cfg = cfg or {}
 
     def _refresh_merge_button(self):
-        """当输出目录存在 sentence_*.wav 时启用合并按钮。"""
+        """当输出目录存在 sentence_*.wav 时启用合并和重新获取停顿按钮。"""
         has_wavs = bool(collect_sentence_wavs(self._output_dir))
         has_sentences = bool(self._sentences)
         self._btn_merge.setEnabled(has_wavs and has_sentences)
+        self._btn_refresh_pauses.setEnabled(has_wavs and has_sentences)
 
     def _diff_sentences(self) -> tuple[list[int], list[int], list[int]]:
         """对比当前句子与 wav_map，返回 (未变, 已变, 新增) 的 0-based 索引列表。"""
@@ -345,6 +360,7 @@ class SynthesisPanel(QWidget):
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
         self._btn_merge.setEnabled(False)
+        self._btn_refresh_pauses.setEnabled(False)
         self._log.clear()
 
         if self._worker is not None:
@@ -425,12 +441,14 @@ class SynthesisPanel(QWidget):
             self._status_label.setText("合成完成 ✓")
             self._log_msg("━━━━━━━━━━ 完成 ━━━━━━━━━━")
             self._btn_merge.setEnabled(True)
+            self._btn_refresh_pauses.setEnabled(True)
             self.synthesis_done.emit(self._output_dir)
         else:
             missing = len(self._sentences) - len(self._project.wav_map)
             self._status_label.setText(f"合成完成，但 {missing} 句失败")
             self._log_msg(f"⚠ 合成完成，但 {missing} 句失败，请检查日志")
             self._btn_merge.setEnabled(False)
+            self._btn_refresh_pauses.setEnabled(False)
 
     def _on_segment_regenerate_request(self, index: int):
         """右侧片段被选中/双击，显示/隐藏按钮。"""
@@ -528,7 +546,7 @@ class SynthesisPanel(QWidget):
         self._voice_panel.clear_segments()
         self._refresh_merge_button()
 
-    def _merge_full_audio(self):
+    def _merge_full_audio(self, force_refresh_pauses: bool = False):
         """把 output_dir 里的片段合并成完整音频，在后台线程执行。"""
         if not self._sentences:
             self._log_msg("⚠ 没有句子，无法合并")
@@ -541,10 +559,23 @@ class SynthesisPanel(QWidget):
             return
 
         self._btn_merge.setEnabled(False)
+        self._btn_refresh_pauses.setEnabled(False)
         self._status_label.setText("正在合并完整音频…")
 
+        # 判断是否可以复用已保存的 pauses
+        reusable_pauses = None
+        if not force_refresh_pauses:
+            if (
+                self._project.pauses
+                and len(self._project.pauses) == len(self._sentences)
+                and self._project.pauses_for_sentences == self._sentences
+            ):
+                reusable_pauses = list(self._project.pauses)
+                self._log_msg("📐 复用已保存的 LLM 停顿建议")
+
         self._merge_worker = MergeWorker(
-            self._sentences, self._output_dir, self._llm_cfg
+            self._sentences, self._output_dir, self._llm_cfg,
+            pauses=reusable_pauses,
         )
         self._merge_worker.log.connect(self._log_msg)
         self._merge_worker.progress.connect(self._on_merge_progress)
@@ -553,6 +584,14 @@ class SynthesisPanel(QWidget):
         self._merge_worker.finished.connect(self._on_merge_worker_finished)
         self._merge_worker.error.connect(self._on_merge_worker_finished)
         self._merge_worker.start()
+
+    def _refresh_pauses(self):
+        """清空已保存的停顿建议，重新询问 LLM。"""
+        self._project.pauses = []
+        self._project.pauses_for_sentences = []
+        self._project.save()
+        self._log_msg("🔄 已清空停顿建议，下次合并将重新询问 LLM")
+        self._merge_full_audio(force_refresh_pauses=True)
 
     def _on_merge_progress(self, current: int, total: int, message: str):
         self._progress.setMaximum(total)
@@ -563,10 +602,12 @@ class SynthesisPanel(QWidget):
         self._progress.setValue(self._progress.maximum())
         self._status_label.setText(f"完整音频已生成: {self._output_dir}/full_dub.wav")
         self._btn_merge.setEnabled(True)
+        self._btn_refresh_pauses.setEnabled(True)
 
-        # 保存本次合并实际使用的 pauses，供字幕页重新生成时对齐
+        # 保存本次合并实际使用的 pauses 及其对应的句子快照
         if self._merge_worker is not None:
             self._project.pauses = list(self._merge_worker.pauses)
+            self._project.pauses_for_sentences = list(self._sentences)
             self._project.save()
 
         self.merge_done.emit(entries)
@@ -575,12 +616,14 @@ class SynthesisPanel(QWidget):
         self._log_msg(f"✗ 合并失败: {msg}")
         self._status_label.setText("合并失败")
         self._btn_merge.setEnabled(True)
+        self._btn_refresh_pauses.setEnabled(True)
 
     def _on_merge_worker_finished(self):
         """worker 生命周期结束，安全清理引用，不访问其成员。"""
         if self._merge_worker is not None:
             self._merge_worker.deleteLater()
             self._merge_worker = None
+        self._btn_refresh_pauses.setEnabled(True)
 
     def set_client(self, client: BaseTTSClient):
         """外部（如 MainWindow）动态切换 API 客户端。"""
@@ -625,6 +668,7 @@ class SynthesisPanel(QWidget):
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
         self._btn_merge.setEnabled(False)
+        self._btn_refresh_pauses.setEnabled(False)
         self._voice_panel.reset_for_new_project()
 
     def get_output_dir(self) -> str:
