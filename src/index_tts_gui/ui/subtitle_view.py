@@ -51,6 +51,7 @@ from index_tts_gui.core.subtitler import (
 )
 from index_tts_gui.core.io_ass import entries_to_ass
 from index_tts_gui.ui.audio_engine import AudioEngine
+from index_tts_gui.ui.audio_load_worker import AudioLoadWorker
 from index_tts_gui.ui.timeline_canvas import TimelineCanvas
 from index_tts_gui.ui.subtitle_regenerate_worker import SubtitleRegenerateWorker
 
@@ -79,6 +80,7 @@ class SubtitlePanel(QWidget):
 
         # 波形引擎
         self._audio_engine = AudioEngine()
+        self._audio_load_worker: AudioLoadWorker | None = None
 
         self._setup_ui()
         self._connect_signals()
@@ -341,7 +343,7 @@ class SubtitlePanel(QWidget):
     # ── 音频 ──
 
     def _refresh_project_audio(self):
-        """切换工程后仅检测 full_dub.wav 是否存在，避免大文件阻塞主线程。"""
+        """切换工程后自动在后台加载 full_dub.wav 波形，避免阻塞主线程。"""
         self._stop()
         self._audio_path = ""
         self._audio_engine.clear()
@@ -351,16 +353,13 @@ class SubtitlePanel(QWidget):
         output_dir = self._output_dir()
         auto_path = os.path.join(output_dir, "full_dub.wav")
         if os.path.exists(auto_path):
-            # 不自动加载波形，避免大工程卡顿；用户可手动点击「加载音频」
-            self._btn_load_audio.setText(f"📂 {os.path.basename(auto_path)} (点击加载)")
-            self._btn_load_audio.setToolTip(f"{auto_path}\n点击加载音频波形")
+            self._load_audio_path(auto_path)
         else:
             self._btn_load_audio.setText("📂 加载音频")
-            self._btn_load_audio.setToolTip("")
-        self._update_time_label(0, 0)
-        self._seek.setEnabled(False)
-        self._btn_play.setEnabled(False)
-        self._btn_stop.setEnabled(False)
+            self._update_time_label(0, 0)
+            self._seek.setEnabled(False)
+            self._btn_play.setEnabled(False)
+            self._btn_stop.setEnabled(False)
 
     def _load_saved_subtitles(self):
         """优先从 project.json 中加载已保存的字幕；没有则尝试后台重建。"""
@@ -411,32 +410,80 @@ class SubtitlePanel(QWidget):
             self._load_audio_path(path)
 
     def _load_audio_path(self, path: str):
-        try:
-            self._audio_path = path
-            self._player.setSource(QUrl.fromLocalFile(path))
+        """加载音频：播放器立即设置，波形在后台线程加载并打印日志。"""
+        self._audio_path = path
+        self._player.setSource(QUrl.fromLocalFile(path))
 
-            # 后台加载波形
-            success = self._audio_engine.load_audio(path)
-            if success:
-                self._timeline.set_audio_engine(self._audio_engine)
-                self._timeline.set_duration(self._audio_engine.duration)
-            else:
-                self._audio_engine.clear()
-                self._timeline.set_audio_engine(None)
+        # 停止并清理旧 worker
+        if self._audio_load_worker is not None:
+            try:
+                self._audio_load_worker.loaded.disconnect()
+            except Exception:
+                pass
+            try:
+                self._audio_load_worker.failed.disconnect()
+            except Exception:
+                pass
+            try:
+                self._audio_load_worker.finished.disconnect()
+            except Exception:
+                pass
+            if not self._audio_load_worker.isFinished():
+                self._audio_load_worker.wait(1000)
+            self._audio_load_worker.deleteLater()
 
-            self._btn_load_audio.setText(f"📂 {os.path.basename(path)}")
-            self._btn_play.setEnabled(True)
-            self._btn_stop.setEnabled(True)
-            self._seek.setEnabled(True)
-        except Exception as e:
-            logger.exception("加载音频失败: %s", path)
-            self._audio_path = ""
-            self._audio_engine.clear()
-            self._timeline.set_audio_engine(None)
-            self._btn_load_audio.setText("📂 加载音频")
-            self._btn_play.setEnabled(False)
-            self._btn_stop.setEnabled(False)
-            self._seek.setEnabled(False)
+        # 先清空旧波形，UI 进入加载状态
+        self._audio_engine.clear()
+        self._timeline.set_audio_engine(None)
+        self._timeline.set_duration(0)
+        self._btn_load_audio.setText(f"📂 {os.path.basename(path)} (加载中…)")
+        self._log_status.emit(f"正在后台加载音频波形: {os.path.basename(path)}…")
+        logger.info("正在后台加载音频波形: %s", path)
+
+        self._audio_load_worker = AudioLoadWorker(path)
+        self._audio_load_worker.loaded.connect(self._on_audio_loaded)
+        self._audio_load_worker.failed.connect(self._on_audio_load_failed)
+        self._audio_load_worker.finished.connect(self._audio_load_worker.deleteLater)
+        self._audio_load_worker.start()
+
+    def _on_audio_loaded(
+        self,
+        filepath: str,
+        duration: float,
+        sample_rate: int,
+        waveform: object,
+    ):
+        if filepath != self._audio_path:
+            return
+        import numpy as np
+        self._audio_engine.filepath = filepath
+        self._audio_engine.sample_rate = sample_rate
+        self._audio_engine.duration = duration
+        self._audio_engine.waveform = np.array(waveform, dtype=np.float32)
+        self._audio_engine.peak_data = None
+        self._audio_engine._cached_bars = 0
+
+        self._timeline.set_audio_engine(self._audio_engine)
+        self._timeline.set_duration(duration)
+        self._btn_load_audio.setText(f"📂 {os.path.basename(filepath)}")
+        self._btn_play.setEnabled(True)
+        self._btn_stop.setEnabled(True)
+        self._seek.setEnabled(True)
+        self._log_status.emit(f"音频波形加载完成: {os.path.basename(filepath)} ({duration:.2f}s)")
+        logger.info("音频波形加载完成: %s duration=%.2fs", filepath, duration)
+
+    def _on_audio_load_failed(self, filepath: str, msg: str):
+        if filepath != self._audio_path:
+            return
+        logger.error("音频波形加载失败: %s - %s", filepath, msg)
+        self._audio_engine.clear()
+        self._timeline.set_audio_engine(None)
+        self._audio_path = ""
+        self._btn_load_audio.setText("📂 加载音频")
+        self._btn_play.setEnabled(False)
+        self._btn_stop.setEnabled(False)
+        self._seek.setEnabled(False)
+        self._log_status.emit(f"音频加载失败: {os.path.basename(filepath)} - {msg}")
 
     def _toggle_play(self):
         if self._player.playbackState() == QMediaPlayer.PlayingState:
