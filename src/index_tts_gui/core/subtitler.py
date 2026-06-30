@@ -1,14 +1,18 @@
 """
 字幕生成：能量检测 + 文本切分 → SRT
 """
+import logging
 import os
 import re
+
 import numpy as np
 import librosa
 import soundfile as sf
 
 from index_tts_gui.core.merger import get_wav_duration
 from index_tts_gui.core.subtitle import SubtitleEntry
+
+logger = logging.getLogger(__name__)
 
 
 def _build_entries_for_sentence(

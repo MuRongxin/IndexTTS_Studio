@@ -1,6 +1,26 @@
 """Core 模块测试"""
-import sys, os
+import os
+import shutil
+import sys
+import tempfile
+
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+
+_FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+
+
+def _generate_test_wav(path: str, duration: float = 1.5, sample_rate: int = 16000):
+    """生成简单正弦波 WAV 文件，用于不依赖真实合成音频的测试。"""
+    import numpy as np
+    from scipy.io import wavfile
+
+    samples = int(sample_rate * duration)
+    t = np.linspace(0.0, duration, samples, endpoint=False)
+    data = (np.sin(2 * np.pi * 440 * t) * 32767).astype(np.int16)
+    wavfile.write(path, sample_rate, data)
 
 
 def test_splitter():
@@ -110,15 +130,13 @@ def test_tts_client():
     print("✓ tts_client")
 
 
-def test_merger_duration():
-    import os
-    import pytest
+@pytest.mark.skipif(not _FFMPEG_AVAILABLE, reason="ffmpeg/ffprobe not installed")
+def test_merger_duration(tmp_path):
     from index_tts_gui.core.merger import get_wav_duration
-    wav = "output_tts/sentence_01.wav"
-    if not os.path.exists(wav):
-        pytest.skip(f"测试音频不存在: {wav}")
+    wav = str(tmp_path / "test.wav")
+    _generate_test_wav(wav, duration=1.5)
     dur = get_wav_duration(wav)
-    assert dur > 0, f"Invalid duration: {dur}"
+    assert dur == pytest.approx(1.5, abs=0.05)
     print(f"✓ merger (duration: {dur:.2f}s)")
 
 
@@ -130,5 +148,14 @@ if __name__ == "__main__":
     test_llm_client_configured()
     test_subtitler()
     test_tts_client()
-    test_merger_duration()
+
+    from index_tts_gui.core.merger import get_wav_duration
+
+    with tempfile.TemporaryDirectory() as tmp:
+        wav = os.path.join(tmp, "test.wav")
+        _generate_test_wav(wav, duration=1.5)
+        dur = get_wav_duration(wav)
+        assert dur > 0, f"Invalid duration: {dur}"
+        print(f"✓ merger (duration: {dur:.2f}s)")
+
     print("\n全部通过 ✓")
