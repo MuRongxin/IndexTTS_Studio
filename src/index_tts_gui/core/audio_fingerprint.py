@@ -1,58 +1,61 @@
 """音频指纹提取与匹配 — 用于字幕时间轴重新对齐。
 
-原理：从 WAV 片段提取 RMS 包络作为指纹，在目标音频上滑动互相关匹配。
+原理：将音频片段降采样为固定帧率的波形指纹，在目标音频上滑动互相关匹配。
 """
 import numpy as np
 import soundfile as sf
+
+# 指纹的时间分辨率：10ms 一帧，100 帧/秒
+FP_FRAME_MS = 10
 
 
 def extract_fingerprint(
     wav_path: str,
     start_sec: float,
     end_sec: float,
-    num_points: int = 200,
 ) -> list[float]:
-    """从 WAV 文件中提取指定时间段的 RMS 包络指纹。
+    """从 WAV 片段中按固定帧率提取波形指纹。
+
+    每 10ms 取一个采样点的绝对值，归一化到 [-1, 1]。
+    短于 10ms 的片段返回空列表。
 
     Args:
         wav_path: 音频文件路径
-        start_sec: 起始时间（秒）
-        end_sec: 结束时间（秒）
-        num_points: 降采样后的指纹长度
+        start_sec: 片段起始时间（秒）
+        end_sec: 片段结束时间（秒）
 
     Returns:
-        RMS 包络数组，长度 num_points，归一化到 [0, 1]
+        归一化波形指纹列表，长度 ≈ (end_sec - start_sec) * 100
     """
-    if start_sec >= end_sec:
-        return [0.0] * num_points
+    dur = end_sec - start_sec
+    if dur <= 0.01:
+        return []
 
-    # 读取音频
     data, sr = sf.read(wav_path, dtype="float32", always_2d=False)
     if data.ndim > 1:
-        data = data.mean(axis=1)  # 转单声道
+        data = data.mean(axis=1)
+    data = data.astype(np.float64)
 
+    frame_samples = max(1, int(FP_FRAME_MS / 1000.0 * sr))
     start_sample = max(0, int(start_sec * sr))
     end_sample = min(len(data), int(end_sec * sr))
-    if end_sample <= start_sample:
-        return [0.0] * num_points
 
-    segment = data[start_sample:end_sample].astype(np.float64)
-    segment_len = len(segment)
+    fp = []
+    for pos in range(start_sample, end_sample, frame_samples):
+        if pos < len(data):
+            fp.append(float(data[pos]))
+    return _normalize(fp)
 
-    # 计算 RMS 包络：分帧 → RMS → 降采样
-    frame_size = max(1, segment_len // num_points)
-    rms = np.zeros(num_points, dtype=np.float64)
-    for i in range(num_points):
-        frame_start = i * frame_size
-        frame_end = min(segment_len, frame_start + frame_size)
-        if frame_end > frame_start:
-            chunk = segment[frame_start:frame_end]
-            rms[i] = np.sqrt(np.mean(chunk ** 2))
-    # 归一化
-    rms_max = rms.max()
-    if rms_max > 0:
-        rms /= rms_max
-    return rms.tolist()
+
+def _normalize(fp: list[float]) -> list[float]:
+    """归一化到 [-1, 1]，全零时不变。"""
+    if not fp:
+        return fp
+    arr = np.array(fp, dtype=np.float64)
+    max_abs = np.max(np.abs(arr))
+    if max_abs > 0:
+        arr /= max_abs
+    return arr.tolist()
 
 
 def match_fingerprint(
@@ -60,28 +63,29 @@ def match_fingerprint(
     target_wav_path: str,
     search_start: float = 0.0,
     search_end: float | None = None,
-    step_ms: int = 10,
     min_correlation: float = 0.6,
 ) -> tuple[float, float] | None:
-    """在目标音频中搜索指纹的最佳匹配位置。
+    """在目标音频中按相同帧率滑动指纹，找最佳匹配位置。
 
     Args:
-        fingerprint: 查询指纹（extract_fingerprint 的输出）
+        fingerprint: extract_fingerprint 的输出
         target_wav_path: 目标音频文件路径
-        search_start: 搜索范围起始（秒）
-        search_end: 搜索范围结束（秒），None 表示文件末尾
-        step_ms: 搜索步长（毫秒）
-        min_correlation: 最低置信度阈值，低于此值返回 None
+        search_start: 搜索起始时间（秒）
+        search_end: 搜索结束时间（秒），None 表示文件末尾
+        min_correlation: 最低相关系数阈值
 
     Returns:
-        (最佳匹配时间, 相关系数)，匹配失败返回 None
+        (最佳匹配时间, 相关系数)，失败返回 None
     """
+    if not fingerprint:
+        return None
+
     fp = np.array(fingerprint, dtype=np.float64)
     fp_norm = np.linalg.norm(fp)
     if fp_norm == 0:
         return None
+    fp_len = len(fp)
 
-    # 读取目标音频
     data, sr = sf.read(target_wav_path, dtype="float32", always_2d=False)
     if data.ndim > 1:
         data = data.mean(axis=1)
@@ -92,34 +96,28 @@ def match_fingerprint(
     if search_end <= search_start:
         return None
 
-    step_samples = max(1, int(step_ms / 1000.0 * sr))
-    fp_duration = len(fp) * step_samples / sr / 10  # 粗略估算指纹覆盖的时长
+    frame_samples = max(1, int(FP_FRAME_MS / 1000.0 * sr))
+    start_pos = int(search_start * sr)
+    end_pos = min(len(data) - fp_len * frame_samples, int(search_end * sr))
+    if end_pos <= start_pos:
+        return None
 
     best_corr = -1.0
     best_time = search_start
 
-    pos = int(search_start * sr)
-    end_pos = int(search_end * sr) - step_samples * len(fp)
-    if end_pos <= pos:
-        return None
-
-    while pos < end_pos:
-        # 从目标音频取同样长度的窗口
-        window = np.zeros(len(fp), dtype=np.float64)
-        for i in range(len(fp)):
-            sample_idx = pos + i * step_samples
-            if sample_idx < len(data):
-                window[i] = abs(data[sample_idx])
-
+    # 每 10ms 步进一次
+    for pos in range(start_pos, end_pos, frame_samples):
+        window = np.array(
+            [abs(data[pos + i * frame_samples]) for i in range(fp_len)],
+            dtype=np.float64,
+        )
         w_norm = np.linalg.norm(window)
         if w_norm > 0:
-            corr = np.dot(fp, window) / (fp_norm * w_norm)
+            corr = float(np.dot(fp, window) / (fp_norm * w_norm))
             if corr > best_corr:
                 best_corr = corr
                 best_time = pos / sr
 
-        pos += step_samples
-
     if best_corr >= min_correlation:
-        return (best_time, float(best_corr))
+        return (best_time, best_corr)
     return None

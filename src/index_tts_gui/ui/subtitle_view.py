@@ -1215,6 +1215,8 @@ class SubtitlePanel(QWidget):
         if not path:
             return
 
+        self._realign_target_wav = path
+
         from index_tts_gui.ui.subtitle_realign_worker import SubtitleRealignWorker
         entries = self._track.to_entries()
         if not any(e.fingerprint for e in entries):
@@ -1245,7 +1247,10 @@ class SubtitlePanel(QWidget):
         self._info_label.setStyleSheet("color: #f57c00; font-size: 14px;")
 
     def _on_realign_finished(self, entries: list):
-        self.load_entries(entries)
+        self.load_entries(entries, auto_load_audio=False)
+        # 加载用户选择的修改后音频
+        if self._realign_target_wav and os.path.exists(self._realign_target_wav):
+            self._load_audio_path(self._realign_target_wav)
         self._info_label.setText(f"✅ 音频对齐完成")
         self._info_label.setStyleSheet("color: #4caf50; font-size: 14px;")
         self._btn_realign.setEnabled(True)
