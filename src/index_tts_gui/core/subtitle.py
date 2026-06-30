@@ -74,6 +74,7 @@ class SubtitleItem:
     end_time: float
     text: str = ""
     style: Optional[SubtitleStyle] = None
+    fingerprint: list[float] | None = None
 
     @property
     def duration(self) -> float:
@@ -108,6 +109,7 @@ class SubtitleTrack:
                     start_time=e.start_sec,
                     end_time=e.end_sec,
                     text=e.text,
+                    fingerprint=e.fingerprint,
                 )
             )
         track.reindex()
@@ -121,6 +123,7 @@ class SubtitleTrack:
                 start_sec=item.start_time,
                 end_sec=item.end_time,
                 text=item.text,
+                fingerprint=item.fingerprint,
             )
             for item in self.items
         ]
