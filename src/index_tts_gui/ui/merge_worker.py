@@ -103,7 +103,24 @@ class MergeWorker(QThread):
         )
         self.log.emit(f"✓ 已生成字幕: {len(entries)} 条")
 
+        self._check_canceled()
+        self.log.emit("🔬 提取音频指纹…")
+        self._extract_fingerprints(entries, output_path)
+        self.log.emit(f"🔬 指纹提取完成: {sum(1 for e in entries if e.fingerprint)} 条")
+
         self.finished.emit(entries)
+
+    @staticmethod
+    def _extract_fingerprints(entries, full_dub_path: str):
+        """为每条字幕条目从 full_dub.wav 中提取音频指纹。"""
+        from index_tts_gui.core.audio_fingerprint import extract_fingerprint
+        for e in entries:
+            try:
+                e.fingerprint = extract_fingerprint(
+                    full_dub_path, e.start_sec, e.end_sec
+                )
+            except Exception:
+                e.fingerprint = None
 
     def _resolve_pauses(self) -> list[float]:
         if self._provided_pauses is not None and len(self._provided_pauses) == len(self._sentences):

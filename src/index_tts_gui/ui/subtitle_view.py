@@ -259,6 +259,21 @@ class SubtitlePanel(QWidget):
 
         btn_row.addStretch()
 
+        self._btn_realign = QPushButton("🔍 音频对齐")
+        self._btn_realign.setToolTip("导入修改间隔后的 full_dub.wav，自动匹配字幕位置")
+        self._btn_realign.setEnabled(False)
+        self._btn_realign.setStyleSheet("""
+            QPushButton {
+                background: #ff9800; color: white;
+                padding: 8px 16px; border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: #f57c00; }
+            QPushButton:disabled { background: #ccc; }
+        """)
+        self._btn_realign.clicked.connect(self._start_realign)
+        btn_row.addWidget(self._btn_realign)
+
         self._btn_export = QPushButton("📤 导出 SRT")
         self._btn_export.setEnabled(False)
         self._btn_export.setStyleSheet("""
@@ -1149,6 +1164,7 @@ class SubtitlePanel(QWidget):
         self._btn_merge.setEnabled(selected_count >= 2)
         self._btn_export.setEnabled(self._track.count > 0)
         self._btn_export_ass.setEnabled(self._track.count > 0)
+        self._btn_realign.setEnabled(self._track.count > 0)
 
     # ── 重新生成 / 导出 ──
 
@@ -1187,6 +1203,52 @@ class SubtitlePanel(QWidget):
             return
         self.load_entries(entries, auto_load_audio=False)
         self._save_subtitles_to_project()
+
+    # ── 音频指纹对齐 ──
+
+    def _start_realign(self):
+        """选择修改后的音频文件，启动指纹匹配后台线程。"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择修改后的完整音频", self._output_dir(),
+            "WAV 文件 (*.wav)"
+        )
+        if not path:
+            return
+
+        from index_tts_gui.ui.subtitle_realign_worker import SubtitleRealignWorker
+        entries = self._track.to_entries()
+        if not any(e.fingerprint for e in entries):
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "无指纹数据",
+                "当前字幕没有音频指纹。请先通过「合并完整音频」生成带指纹的字幕。")
+            return
+
+        self._realign_worker = SubtitleRealignWorker(entries, path)
+        self._realign_worker.log.connect(self._on_realign_log)
+        self._realign_worker.progress.connect(self._on_realign_progress)
+        self._realign_worker.finished.connect(self._on_realign_finished)
+        self._realign_worker.start()
+        self._btn_realign.setEnabled(False)
+
+    def _on_realign_log(self, msg: str):
+        logger.info("音频对齐: %s", msg)
+
+    def _on_realign_progress(self, current: int, total: int, corr: float):
+        if corr >= 0:
+            self._info_label.setText(
+                f"🔍 匹配中: {current}/{total}，置信度 {corr:.2f}"
+            )
+        else:
+            self._info_label.setText(
+                f"⚠ 匹配中: {current}/{total}，上一条失败"
+            )
+        self._info_label.setStyleSheet("color: #f57c00; font-size: 14px;")
+
+    def _on_realign_finished(self, entries: list):
+        self.load_entries(entries)
+        self._info_label.setText(f"✅ 音频对齐完成")
+        self._info_label.setStyleSheet("color: #4caf50; font-size: 14px;")
+        self._btn_realign.setEnabled(True)
 
     def _export_srt(self):
         default_path = os.path.join(self._output_dir(), "full_dub.srt")

@@ -16,6 +16,7 @@ class SubtitleEntry:
     start_sec: float
     end_sec: float
     text: str
+    fingerprint: list[float] | None = None
 
 
 @dataclass
