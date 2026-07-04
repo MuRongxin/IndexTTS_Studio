@@ -146,7 +146,21 @@ class TimelineCanvas(QWidget):
 
     def set_playhead(self, time: float):
         self.playhead_time = max(0.0, min(time, self.duration))
+        self._ensure_playhead_visible()
         self.update()
+
+    def _ensure_playhead_visible(self):
+        """平滑滚动使播放头保持在视野内（65% 位置），用户拖拽时不触发。"""
+        if self.dragging and self.drag_mode == "pan":
+            return
+        vis_start, vis_end = self._get_visible_time_range()
+        vis_duration = vis_end - vis_start
+        if vis_duration <= 0:
+            return
+        target = self.playhead_time - vis_duration * 0.65
+        target = max(0.0, target)
+        self.offset += (target - self.offset) * 0.35
+        self.offset = max(0.0, self.offset)
 
     def refresh_waveform(self):
         if self.audio_engine and self.audio_engine.is_loaded():
@@ -866,16 +880,6 @@ class TimelineCanvas(QWidget):
 
     def _get_visible_time_range(self) -> Tuple[float, float]:
         return self.offset, self._x_to_time(self.width())
-
-    def _ensure_playhead_visible(self):
-        vis_start, vis_end = self._get_visible_time_range()
-        margin = (vis_end - vis_start) * 0.1
-        if self.playhead_time < vis_start + margin:
-            self.offset = max(0.0, self.playhead_time - margin)
-            self.update()
-        elif self.playhead_time > vis_end - margin:
-            self.offset = self.playhead_time - (vis_end - vis_start) + margin
-            self.update()
 
     def resizeEvent(self, event):
         self.refresh_waveform()
