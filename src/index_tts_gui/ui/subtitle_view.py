@@ -55,6 +55,7 @@ from index_tts_gui.ui.audio_engine import AudioEngine
 from index_tts_gui.ui.audio_load_worker import AudioLoadWorker
 from index_tts_gui.ui.timeline_canvas import TimelineCanvas
 from index_tts_gui.ui.subtitle_regenerate_worker import SubtitleRegenerateWorker
+from index_tts_gui.ui.calibrate_worker import CalibrateWorker
 
 
 logger = logging.getLogger("index_tts")
@@ -74,6 +75,7 @@ class SubtitlePanel(QWidget):
         self._undo_stack: list[list[SubtitleEntry]] = []
         self._undo_max = 50
         self._regen_worker: "SubtitleRegenerateWorker | None" = None
+        self._calibrate_worker: "CalibrateWorker | None" = None
 
         # 音频
         self._player = QMediaPlayer()
@@ -259,6 +261,20 @@ class SubtitlePanel(QWidget):
 
         btn_row.addStretch()
 
+        self._btn_calibrate = QPushButton("🔄 校准字幕")
+        self._btn_calibrate.setToolTip("加载修改间隔后的 full_dub.wav，自动重新校准字幕时间戳")
+        self._btn_calibrate.setEnabled(False)
+        self._btn_calibrate.setStyleSheet("""
+            QPushButton {
+                background: #ff9800; color: white;
+                padding: 8px 14px; border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: #e68900; }
+            QPushButton:disabled { background: #ccc; }
+        """)
+        btn_row.addWidget(self._btn_calibrate)
+
         self._btn_export = QPushButton("📤 导出 SRT")
         self._btn_export.setEnabled(False)
         self._btn_export.setStyleSheet("""
@@ -319,6 +335,7 @@ class SubtitlePanel(QWidget):
         self._btn_delete.clicked.connect(self._delete_selected)
         self._btn_export.clicked.connect(self._export_srt)
         self._btn_export_ass.clicked.connect(self._export_ass)
+        self._btn_calibrate.clicked.connect(self._calibrate_subtitles)
 
         # 全局快捷键
         self._shortcut_play = QShortcut(
@@ -643,6 +660,7 @@ class SubtitlePanel(QWidget):
         self._refresh_project_audio()
         self._load_saved_subtitles()
         self._update_button_states()
+        self._cleanup_calibrate_worker()
 
     def reset_for_new_project(self):
         """新建工程时清空字幕、音频和播放器状态。"""
@@ -664,6 +682,22 @@ class SubtitlePanel(QWidget):
         self._btn_stop.setEnabled(False)
         self.refresh_table()
         self._update_button_states()
+        self._cleanup_calibrate_worker()
+
+    def _cleanup_calibrate_worker(self):
+        if self._calibrate_worker is not None:
+            try:
+                self._calibrate_worker.finished.disconnect()
+            except Exception:
+                pass
+            try:
+                self._calibrate_worker.error.disconnect()
+            except Exception:
+                pass
+            self._calibrate_worker.cancel()
+            self._calibrate_worker.deleteLater()
+            self._calibrate_worker = None
+        self._btn_calibrate.setText("🔄 校准字幕")
 
     def _output_dir(self) -> str:
         if self._project:
@@ -1150,6 +1184,14 @@ class SubtitlePanel(QWidget):
         self._btn_export.setEnabled(self._track.count > 0)
         self._btn_export_ass.setEnabled(self._track.count > 0)
 
+        can_calibrate = bool(
+            self._track.count > 0
+            and self._project is not None
+            and self._project.sentences
+            and self._calibrate_worker is None
+        )
+        self._btn_calibrate.setEnabled(can_calibrate)
+
     # ── 重新生成 / 导出 ──
 
     def _start_regen_worker(
@@ -1187,6 +1229,76 @@ class SubtitlePanel(QWidget):
             return
         self.load_entries(entries, auto_load_audio=False)
         self._save_subtitles_to_project()
+
+    def _calibrate_subtitles(self):
+        """加载修改间隔后的音频，自动重新校准字幕时间戳。"""
+        if self._calibrate_worker is not None:
+            return
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择修改间隔后的音频", self._output_dir(),
+            "音频文件 (*.wav *.mp3 *.flac)"
+        )
+        if not path:
+            return
+
+        self._calibrate_worker = CalibrateWorker(
+            modified_wav_path=path,
+            sentences=self._project.sentences if self._project else [],
+            output_dir=self._output_dir(),
+            original_pauses=self._project.pauses if self._project else [],
+            current_entries=self._track.to_entries(),
+        )
+        self._calibrate_worker.log.connect(lambda msg: logger.info(msg))
+        self._calibrate_worker.finished.connect(self._on_calibrate_finished)
+        self._calibrate_worker.error.connect(self._on_calibrate_error)
+        self._calibrate_worker.finished.connect(self._calibrate_worker.deleteLater)
+        self._calibrate_worker.error.connect(self._calibrate_worker.deleteLater)
+
+        self._btn_calibrate.setEnabled(False)
+        self._btn_calibrate.setText("🔄 校准中…")
+        self._calibrate_worker.start()
+
+    def _on_calibrate_finished(self, entries):
+        """校准完成：保存原字幕到备份，加载新校准字幕。"""
+        modified_full_dub = self._calibrate_worker._modified_wav_path if self._calibrate_worker else ""
+        self._calibrate_worker = None
+        self._btn_calibrate.setText("🔄 校准字幕")
+        self._update_button_states()
+
+        if not entries:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "校准失败", "未能生成校准后的字幕条目。")
+            return
+
+        self._push_undo()
+        self._track = SubtitleTrack.from_entries(entries)
+        self._track.name = "校准后"
+        self._current_edit_index = -1
+        self._text_edit.clear()
+
+        if os.path.exists(modified_full_dub):
+            self._load_audio_path(modified_full_dub)
+
+        self.refresh_table()
+        self._timeline.set_subtitle_track(self._track)
+        self._update_info_label()
+        self._update_button_states()
+        self._save_subtitles_to_project()
+
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(
+            self, "校准完成",
+            f"已重新映射 {len(entries)} 条字幕时间戳。\n"
+            "原字幕可通过 Ctrl+Z 恢复。"
+        )
+
+    def _on_calibrate_error(self, msg):
+        self._calibrate_worker = None
+        self._btn_calibrate.setText("🔄 校准字幕")
+        self._update_button_states()
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.critical(self, "校准失败", f"字幕校准出错：\n{msg}")
 
     def _export_srt(self):
         default_path = os.path.join(self._output_dir(), "full_dub.srt")
