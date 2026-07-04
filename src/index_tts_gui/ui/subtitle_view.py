@@ -275,6 +275,19 @@ class SubtitlePanel(QWidget):
         """)
         btn_row.addWidget(self._btn_calibrate)
 
+        self._btn_restore_original = QPushButton("↩ 原始字幕")
+        self._btn_restore_original.setToolTip("加载校准前的原始字幕")
+        self._btn_restore_original.setVisible(False)
+        self._btn_restore_original.setStyleSheet("""
+            QPushButton {
+                background: #607d8b; color: white;
+                padding: 8px 14px; border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: #455a64; }
+        """)
+        btn_row.addWidget(self._btn_restore_original)
+
         self._btn_export = QPushButton("📤 导出 SRT")
         self._btn_export.setEnabled(False)
         self._btn_export.setStyleSheet("""
@@ -336,6 +349,7 @@ class SubtitlePanel(QWidget):
         self._btn_export.clicked.connect(self._export_srt)
         self._btn_export_ass.clicked.connect(self._export_ass)
         self._btn_calibrate.clicked.connect(self._calibrate_subtitles)
+        self._btn_restore_original.clicked.connect(self._restore_original_subtitles)
 
         # 全局快捷键
         self._shortcut_play = QShortcut(
@@ -367,7 +381,9 @@ class SubtitlePanel(QWidget):
         self._player.setSource(QUrl())
 
         output_dir = self._output_dir()
-        auto_path = os.path.join(output_dir, "full_dub.wav")
+        auto_path = getattr(self._project, "calibrated_audio_path", "") if self._project else ""
+        if not auto_path or not os.path.exists(auto_path):
+            auto_path = os.path.join(output_dir, "full_dub.wav")
         if os.path.exists(auto_path):
             self._load_audio_path(auto_path)
         else:
@@ -1192,6 +1208,12 @@ class SubtitlePanel(QWidget):
         )
         self._btn_calibrate.setEnabled(can_calibrate)
 
+        has_original = bool(
+            self._project is not None
+            and getattr(self._project, "subtitles_original", None)
+        )
+        self._btn_restore_original.setVisible(has_original)
+
     # ── 重新生成 / 导出 ──
 
     def _start_regen_worker(
@@ -1277,7 +1299,14 @@ class SubtitlePanel(QWidget):
         self._current_edit_index = -1
         self._text_edit.clear()
 
+        if self._project and self._undo_stack:
+            self._project.subtitles_original = [
+                e.__dict__ for e in self._undo_stack[-1]
+            ]
+
         if os.path.exists(modified_full_dub):
+            if self._project:
+                self._project.calibrated_audio_path = modified_full_dub
             self._load_audio_path(modified_full_dub)
 
         self.refresh_table()
@@ -1299,6 +1328,24 @@ class SubtitlePanel(QWidget):
         self._update_button_states()
         from PySide6.QtWidgets import QMessageBox
         QMessageBox.critical(self, "校准失败", f"字幕校准出错：\n{msg}")
+
+    def _restore_original_subtitles(self):
+        """加载校准前的原始字幕。"""
+        if self._project is None:
+            return
+        original = getattr(self._project, "subtitles_original", None)
+        if not original:
+            return
+        self._push_undo()
+        entries = [SubtitleEntry(**item) for item in original]
+        self._track = SubtitleTrack.from_entries(entries)
+        self._track.name = "原始"
+        self._current_edit_index = -1
+        self._text_edit.clear()
+        self.refresh_table()
+        self._timeline.set_subtitle_track(self._track)
+        self._update_info_label()
+        self._update_button_states()
 
     def _export_srt(self):
         default_path = os.path.join(self._output_dir(), "full_dub.srt")

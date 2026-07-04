@@ -78,7 +78,9 @@ class LogStatusBar(QStatusBar):
         super().__init__(parent)
         self._log_label = MarqueeLabel(self)
         self._log_label.setText("就绪")
+        self._log_label.setWordWrap(False)
         self.addWidget(self._log_label, 1)
+        self.setFixedHeight(26)
         self.setStyleSheet("""
             QStatusBar {
                 background: #fafafa;

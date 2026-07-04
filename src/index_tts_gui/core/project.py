@@ -42,6 +42,8 @@ class Project:
         audio_list: list[dict] | None = None,
         wav_map: list[dict] | None = None,
         subtitles: list[dict] | None = None,
+        subtitles_original: list[dict] | None = None,
+        calibrated_audio_path: str = "",
         created_at: str | None = None,
         updated_at: str | None = None,
     ):
@@ -55,6 +57,8 @@ class Project:
         self.audio_list: list[dict] = list(audio_list) if audio_list else []
         self.wav_map: list[dict] = list(wav_map) if wav_map else []
         self.subtitles: list[dict] = list(subtitles) if subtitles else []
+        self.subtitles_original: list[dict] = list(subtitles_original) if subtitles_original else []
+        self.calibrated_audio_path = calibrated_audio_path
         self.created_at = created_at or datetime.now().isoformat()
         self.updated_at = updated_at or datetime.now().isoformat()
 
@@ -89,6 +93,8 @@ class Project:
             "pauses": self.pauses,
             "pauses_for_sentences": self.pauses_for_sentences,
             "subtitles": self.subtitles,
+            "subtitles_original": self.subtitles_original,
+            "calibrated_audio_path": self.calibrated_audio_path,
         }
         tmp_path = self.project_file_path + ".tmp"
         try:
@@ -124,6 +130,8 @@ class Project:
                 pauses=data.get("pauses", []),
                 pauses_for_sentences=data.get("pauses_for_sentences", []),
                 subtitles=data.get("subtitles", []),
+                subtitles_original=data.get("subtitles_original", []),
+                calibrated_audio_path=data.get("calibrated_audio_path", ""),
                 created_at=data.get("created_at"),
                 updated_at=data.get("updated_at"),
             )
