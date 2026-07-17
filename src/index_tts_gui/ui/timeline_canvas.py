@@ -25,7 +25,7 @@ import math
 from typing import Optional, Tuple
 
 import numpy as np
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -37,6 +37,7 @@ from PySide6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
+    QPolygonF,
     QWheelEvent,
 )
 from PySide6.QtWidgets import QSizePolicy, QWidget
@@ -98,6 +99,7 @@ class TimelineCanvas(QWidget):
         self.subtitle_track: Optional[SubtitleTrack] = None
         self.duration = 300.0
         self.waveform_bars: Optional[np.ndarray] = None
+        self.waveform_region: Tuple[float, float] = (0.0, 0.0)  # bars 覆盖的时间区间
 
         self.dragging = False
         self.drag_mode: Optional[str] = None
@@ -150,26 +152,24 @@ class TimelineCanvas(QWidget):
         self.update()
 
     def _ensure_playhead_visible(self):
-        """平滑滚动使播放头保持在视野内（65% 位置），用户拖拽时不触发。"""
+        """播放头到达视野 65% 后钉住不动，波形在其下向左滚动；用户拖拽时不触发。
+
+        直接钉住而非缓动逼近：缓动会让播放头永远追不到稳定点，看起来在晃动。
+        """
         if self.dragging and self.drag_mode == "pan":
             return
         vis_start, vis_end = self._get_visible_time_range()
         vis_duration = vis_end - vis_start
         if vis_duration <= 0:
             return
-        target = self.playhead_time - vis_duration * 0.65
-        target = max(0.0, target)
-        self.offset += (target - self.offset) * 0.35
-        self.offset = max(0.0, self.offset)
+        self.offset = max(0.0, self.playhead_time - vis_duration * 0.65)
 
     def refresh_waveform(self):
-        if self.audio_engine and self.audio_engine.is_loaded():
-            width = self.width()
-            if width > 0:
-                num_bars = min(width, 2000)
-                self.waveform_bars = self.audio_engine.extract_waveform(num_bars)
-        else:
-            self.waveform_bars = None
+        """使波形缓存失效（换音频/窗口尺寸变化时调用）。
+
+        实际提取推迟到绘制时按可见区域进行，这里不做任何重计算。
+        """
+        self.waveform_bars = None
         self.update()
 
     # ---- 坐标转换 ----
@@ -283,7 +283,8 @@ class TimelineCanvas(QWidget):
         return f"{minutes:02d}:{seconds:02d}"
 
     def _draw_waveform(self, painter: QPainter):
-        if self.waveform_bars is None or len(self.waveform_bars) == 0:
+        if self.audio_engine is None or not self.audio_engine.is_loaded() \
+                or self.audio_engine.duration <= 0:
             painter.setPen(self.COLOR_TICK_TEXT)
             painter.setFont(self._font)
             fm = QFontMetrics(self._font)
@@ -297,33 +298,55 @@ class TimelineCanvas(QWidget):
             )
             return
 
-        if self.audio_engine is None or self.audio_engine.duration <= 0:
-            return
-
         total_duration = self.audio_engine.duration
-        num_bars = len(self.waveform_bars)
         vis_start = max(0.0, self.offset)
         vis_end = self._x_to_time(self.width())
+        if vis_end <= vis_start:
+            return
 
-        # 根据缩放级别动态请求更高精度的波形
-        bar_time_width = total_duration / num_bars
+        # 只按可见区域提取（两侧各留一屏余量）：任何缩放级别都保持约 2 条/像素，
+        # 滚动时余量兜住，不用每帧重算；提取本身是向量化的，开销在毫秒级。
+        need_extract = self.waveform_bars is None or len(self.waveform_bars) == 0
+        if not need_extract:
+            r_start, r_end = self.waveform_region
+            region_px = max(1e-9, (r_end - r_start) * self.zoom)
+            bpp = len(self.waveform_bars) / region_px
+            if (
+                vis_start < r_start - 1e-6
+                or vis_end > r_end + 1e-6
+                or bpp < 1.0
+                or bpp > 8.0
+            ):
+                need_extract = True
+        if need_extract:
+            pad = vis_end - vis_start
+            r_start = max(0.0, min(vis_start - pad, total_duration))
+            r_end = min(total_duration, vis_end + pad)
+            if r_end - r_start <= 0:
+                self.waveform_bars = None
+                return
+            desired = max(500, min(8000, int((r_end - r_start) * self.zoom * 2)))
+            self.waveform_bars = self.audio_engine.extract_waveform(
+                desired, r_start, r_end
+            )
+            self.waveform_region = (r_start, r_end)
+
+        bars = self.waveform_bars
+        if bars is None or len(bars) == 0:
+            return
+        num_bars = len(bars)
+        r_start, r_end = self.waveform_region
+        region_dur = r_end - r_start
+        bar_time_width = region_dur / num_bars
         pixel_per_bar = bar_time_width * self.zoom
-        if pixel_per_bar > 4 and self.audio_engine is not None:
-            desired_bars = int(self.width() / max(1, pixel_per_bar) * num_bars)
-            desired_bars = max(num_bars, min(8000, desired_bars))
-            if desired_bars > num_bars:
-                self.waveform_bars = self.audio_engine.extract_waveform(desired_bars)
-                num_bars = len(self.waveform_bars)
 
-        bar_idx_start = max(0, int(vis_start / total_duration * num_bars))
-        bar_idx_end = min(num_bars, int(vis_end / total_duration * num_bars) + 1)
+        bar_idx_start = max(0, int((vis_start - r_start) / bar_time_width))
+        bar_idx_end = min(num_bars, int((vis_end - r_start) / bar_time_width) + 1)
         if bar_idx_start >= bar_idx_end:
             return
 
         center_y = self.HEADER_HEIGHT + self.WAVEFORM_HEIGHT / 2
         half_height = self.WAVEFORM_HEIGHT / 2 - 1
-        bar_time_width = total_duration / num_bars
-        pixel_per_bar = bar_time_width * self.zoom
 
         # 绘制背景
         bg_rect = QRect(0, self.HEADER_HEIGHT, self.width(), self.WAVEFORM_HEIGHT)
@@ -339,14 +362,14 @@ class TimelineCanvas(QWidget):
         points_lower = []
 
         for i in range(bar_idx_start, bar_idx_end):
-            bar_time = i * bar_time_width
+            bar_time = r_start + i * bar_time_width
             x = self._time_to_x(bar_time)
             bar_w = max(1.0, pixel_per_bar)
             if x + bar_w < 0 or x > self.width():
                 continue
             cx = x + bar_w / 2
-            min_p = self.waveform_bars[i, 0]
-            max_p = self.waveform_bars[i, 1]
+            min_p = bars[i, 0]
+            max_p = bars[i, 1]
             points_upper.append((cx, center_y + min_p * half_height))
             points_lower.append((cx, center_y + max_p * half_height))
 
@@ -387,7 +410,8 @@ class TimelineCanvas(QWidget):
         painter.setBrush(QBrush(gradient))
         painter.drawPath(full_path)
 
-        # 波峰描边线
+        # 波峰描边线：只画上、下两条轮廓。
+        # 描整个闭合路径会把左右边缘的竖线也画出来，造成可视区边缘伪影。
         outline_pen = QPen(QColor(
             self.COLOR_WAVEFORM.red(),
             self.COLOR_WAVEFORM.green(),
@@ -396,7 +420,8 @@ class TimelineCanvas(QWidget):
         ), 1)
         painter.setPen(outline_pen)
         painter.setBrush(Qt.NoBrush)
-        painter.drawPath(full_path)
+        painter.drawPolyline(QPolygonF([QPointF(cx, y) for cx, y in points_upper]))
+        painter.drawPolyline(QPolygonF([QPointF(cx, y) for cx, y in points_lower]))
 
     def _draw_subtitle_blocks(self, painter: QPainter):
         if self.subtitle_track is None:
@@ -488,7 +513,7 @@ class TimelineCanvas(QWidget):
                 painter.drawRect(right_handle)
 
     def _draw_playhead(self, painter: QPainter):
-        x = int(self._time_to_x(self.playhead_time))
+        x = self._time_to_x(self.playhead_time)
         if x < -2 or x > self.width() + 2:
             return
 
@@ -496,7 +521,7 @@ class TimelineCanvas(QWidget):
         pen = QPen(ph_color)
         pen.setWidth(2)
         painter.setPen(pen)
-        painter.drawLine(x, self.HEADER_HEIGHT, x, self.height())
+        painter.drawLine(QPointF(x, self.HEADER_HEIGHT), QPointF(x, self.height()))
 
         triangle_size = 8
         triangle = QPainterPath()
@@ -512,11 +537,11 @@ class TimelineCanvas(QWidget):
         fm = QFontMetrics(self._font)
         time_str = self._format_time(self.playhead_time, True)
         text_rect = fm.boundingRect(time_str)
-        label_x = x - text_rect.width() // 2
+        label_x = x - text_rect.width() / 2
         label_y = self.HEADER_HEIGHT - triangle_size - text_rect.height() - 2
         painter.setPen(ph_color)
         painter.drawText(
-            label_x, label_y, text_rect.width(), text_rect.height(),
+            QRectF(label_x, label_y, text_rect.width(), text_rect.height()),
             Qt.AlignCenter, time_str,
         )
 

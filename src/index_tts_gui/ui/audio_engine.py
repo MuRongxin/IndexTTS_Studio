@@ -31,7 +31,7 @@ class AudioEngine:
         self.filepath: str = ""
         self.waveform: Optional[np.ndarray] = None  # shape=(n_samples, n_channels)
         self.peak_data: Optional[np.ndarray] = None  # shape=(n_bars, 2)
-        self._cached_bars: int = 0
+        self._cache_key: Optional[tuple] = None
 
     def load_audio(self, filepath: str) -> bool:
         """加载音频文件。支持直接从视频文件提取。"""
@@ -78,8 +78,7 @@ class AudioEngine:
             self.sample_rate = sr
             self.waveform = waveform.astype(np.float32)
             self.duration = self.waveform.shape[0] / self.sample_rate
-            self.peak_data = None
-            self._cached_bars = 0
+            self.invalidate_cache()
             return True
 
         self.clear()
@@ -123,40 +122,54 @@ class AudioEngine:
     def is_loaded(self) -> bool:
         return self.waveform is not None and self.waveform.size > 0
 
-    def extract_waveform(self, num_bars: int = 2000) -> np.ndarray:
-        """将波形降采样为指定数量的峰值条，返回 shape=(num_bars, 2)。"""
+    def extract_waveform(
+        self, num_bars: int = 2000, start: float = 0.0, end: float = 0.0
+    ) -> np.ndarray:
+        """将 [start, end] 秒区间的波形降采样为峰值条，返回 shape=(num_bars, 2)。
+
+        每条对应一个互不重叠的采样区间，存 (min, max)；end <= start 时提取到
+        文件尾。num_bars 超过区间采样数时按采样数截断（每条 1 采样）。
+        结果按 (num_bars, start, end) 缓存。向量化实现，无 Python 逐条循环。
+        """
         if not self.is_loaded():
             return np.zeros((num_bars, 2), dtype=np.float32)
 
-        if self._cached_bars == num_bars and self.peak_data is not None:
-            return self.peak_data
+        start = max(0.0, min(float(start), self.duration))
+        if end <= start:
+            end = self.duration
+        end = min(float(end), self.duration)
 
-        num_bars = max(1, num_bars)
-        n_samples = self.waveform.shape[0]
-        if n_samples == 0:
-            self.peak_data = np.zeros((num_bars, 2), dtype=np.float32)
-            self._cached_bars = num_bars
+        num_bars = max(1, int(num_bars))
+        key = (num_bars, round(start, 3), round(end, 3))
+        if self._cache_key == key and self.peak_data is not None:
             return self.peak_data
 
         if self.waveform.shape[1] > 1:
-            mono = np.mean(self.waveform, axis=1)
+            mono = self.waveform.mean(axis=1)
         else:
             mono = self.waveform[:, 0]
 
-        indices = np.linspace(0, n_samples, num_bars + 1, dtype=np.int64)
-        peak_data = np.zeros((num_bars, 2), dtype=np.float32)
-        for i in range(num_bars):
-            start = indices[i]
-            end = indices[i + 1]
-            if start >= end:
-                continue
-            chunk = mono[start:end]
-            peak_data[i, 0] = np.min(chunk)
-            peak_data[i, 1] = np.max(chunk)
+        s0 = int(start * self.sample_rate)
+        s1 = min(mono.shape[0], max(s0 + 1, int(end * self.sample_rate)))
+        seg = mono[s0:s1]
+
+        num_bars = min(num_bars, seg.shape[0])
+        counts = np.full(num_bars, seg.shape[0] // num_bars, dtype=np.int64)
+        counts[: seg.shape[0] % num_bars] += 1
+        starts = np.concatenate(([0], np.cumsum(counts)[:-1]))
+
+        peak_data = np.empty((num_bars, 2), dtype=np.float32)
+        peak_data[:, 0] = np.minimum.reduceat(seg, starts)
+        peak_data[:, 1] = np.maximum.reduceat(seg, starts)
 
         self.peak_data = peak_data
-        self._cached_bars = num_bars
+        self._cache_key = key
         return self.peak_data
+
+    def invalidate_cache(self) -> None:
+        """使峰值缓存失效（音频数据被替换后调用）。"""
+        self.peak_data = None
+        self._cache_key = None
 
     def clear(self) -> None:
         self.sample_rate = 0
@@ -164,7 +177,7 @@ class AudioEngine:
         self.filepath = ""
         self.waveform = None
         self.peak_data = None
-        self._cached_bars = 0
+        self._cache_key = None
 
     def __del__(self):
         self.clear()

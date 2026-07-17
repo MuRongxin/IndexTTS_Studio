@@ -10,7 +10,7 @@ import logging
 import os
 from typing import Callable, List, Optional
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, QElapsedTimer, QTimer
 from PySide6.QtGui import QFont, QColor, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -83,6 +83,16 @@ class SubtitlePanel(QWidget):
         self._player.setAudioOutput(self._audio_output)
         self._player.positionChanged.connect(self._on_position_changed)
         self._player.durationChanged.connect(self._on_duration_changed)
+        self._player.playbackStateChanged.connect(self._on_playback_state_changed)
+
+        # 平滑播放头：positionChanged 频率太低（约几 Hz），直接驱动滚动会显得一顿一顿。
+        # 播放时用墙钟在两次 positionChanged 之间外推，60fps 刷新时间轴。
+        self._pos_anchor_ms = 0
+        self._pos_anchor_clock = QElapsedTimer()
+        self._pos_anchor_clock.start()
+        self._smooth_timer = QTimer(self)
+        self._smooth_timer.setInterval(16)
+        self._smooth_timer.timeout.connect(self._on_smooth_tick)
 
         # 波形引擎
         self._audio_engine = AudioEngine()
@@ -506,8 +516,7 @@ class SubtitlePanel(QWidget):
         self._audio_engine.sample_rate = sample_rate
         self._audio_engine.duration = duration
         self._audio_engine.waveform = np.array(waveform, dtype=np.float32)
-        self._audio_engine.peak_data = None
-        self._audio_engine._cached_bars = 0
+        self._audio_engine.invalidate_cache()
 
         self._timeline.set_audio_engine(self._audio_engine)
         self._timeline.set_duration(duration)
@@ -548,7 +557,24 @@ class SubtitlePanel(QWidget):
     def _on_slider_released(self):
         self._player.setPosition(self._seek.value())
 
+    # 播放中 positionChanged 与平滑外推的漂移超过该值才重同步锚点。
+    # 小于它视为后端位置延迟/量化噪声，忽略以避免把播放头往回拽。
+    _RESYNC_THRESHOLD_MS = 300
+
     def _on_position_changed(self, pos_ms: int):
+        playing = self._player.playbackState() == QMediaPlayer.PlayingState
+        if playing:
+            # 播放中播放头归 _on_smooth_tick 独占，这里只在大漂移
+            # （seek/卡壳）时重同步锚点；小漂移是后端位置延迟，直接忽略，
+            # 否则每次 positionChanged 都会把平滑前进的播放头往回拽。
+            est_ms = self._pos_anchor_ms + self._pos_anchor_clock.elapsed()
+            if abs(pos_ms - est_ms) > self._RESYNC_THRESHOLD_MS:
+                self._pos_anchor_ms = pos_ms
+                self._pos_anchor_clock.restart()
+        else:
+            self._pos_anchor_ms = pos_ms
+            self._pos_anchor_clock.restart()
+
         dur = self._player.duration()
         if dur > 0:
             self._seek.blockSignals(True)
@@ -559,10 +585,35 @@ class SubtitlePanel(QWidget):
             pos_s = pos_ms / 1000.0
             dur_s = dur / 1000.0
             self._update_time_label(pos_s, dur_s)
-            self._timeline.set_playhead(pos_s)
+            if not playing:
+                self._timeline.set_playhead(pos_s)
 
             # 高亮当前字幕
             self._highlight_current(pos_s)
+
+    def _on_playback_state_changed(self, state):
+        if state == QMediaPlayer.PlayingState:
+            self._pos_anchor_ms = self._player.position()
+            self._pos_anchor_clock.restart()
+            self._smooth_timer.start()
+        else:
+            self._smooth_timer.stop()
+
+    def _on_smooth_tick(self):
+        """播放中按墙钟外推播放头（60fps），让波形/播放头滚动丝滑。
+
+        只刷新时间轴与时间标签；进度条与字幕高亮仍由 positionChanged 低频更新，
+        避免 60fps 下反复扫描表格。
+        """
+        if self._player.playbackState() != QMediaPlayer.PlayingState:
+            return
+        est_ms = self._pos_anchor_ms + self._pos_anchor_clock.elapsed()
+        dur_ms = self._player.duration()
+        if dur_ms > 0:
+            est_ms = min(est_ms, dur_ms)
+            pos_s = est_ms / 1000.0
+            self._timeline.set_playhead(pos_s)
+            self._update_time_label(pos_s, dur_ms / 1000.0)
 
     def _on_duration_changed(self, dur_ms: int):
         self._seek.setRange(0, max(1, dur_ms))
