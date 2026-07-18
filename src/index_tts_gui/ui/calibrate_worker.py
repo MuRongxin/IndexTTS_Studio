@@ -71,12 +71,19 @@ class CalibrateWorker(QThread):
         if len(pauses) < len(self._sentences):
             pauses = list(pauses) + [0.0] * (len(self._sentences) - len(pauses))
 
-        new_starts = align_sentences(
+        new_starts, scores = align_sentences(
             self._modified_wav_path,
             sentence_wavs,
             self._sentences,
             pauses,
         )
+        unreliable = [i + 1 for i, s in enumerate(scores) if s < 0]
+        if unreliable:
+            shown = ", ".join(map(str, unreliable[:10]))
+            more = "…" if len(unreliable) > 10 else ""
+            self.log.emit(
+                f"{len(unreliable)} 句未得到有效匹配，已按邻近句插值: {shown}{more}"
+            )
 
         if self._canceled:
             return

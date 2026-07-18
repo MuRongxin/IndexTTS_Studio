@@ -1,9 +1,9 @@
 """字幕重新生成 worker — 在后台线程执行 ffprobe + 字幕生成"""
-import os
 import logging
 
 from PySide6.QtCore import QThread, Signal
 
+from index_tts_gui.core.merger import collect_sentence_wavs
 from index_tts_gui.core.subtitler import (
     generate_srt_from_sentences,
     generate_srt_from_sentences_with_pauses,
@@ -32,11 +32,9 @@ class SubtitleRegenerateWorker(QThread):
 
     def run(self):
         try:
-            wavs = sorted([
-                os.path.join(self._output_dir, f)
-                for f in os.listdir(self._output_dir)
-                if f.startswith("sentence_") and f.endswith(".wav")
-            ])
+            # 必须按文件名中的数字序号排序：sentence_100 按字典序会排在
+            # sentence_10 前面，直接 sorted() 会在 ≥100 句时错序
+            wavs = collect_sentence_wavs(self._output_dir)
             if not wavs:
                 self.error.emit(f"{self._output_dir}/ 下无分句 WAV")
                 return

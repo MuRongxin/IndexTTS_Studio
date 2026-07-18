@@ -25,7 +25,7 @@ import math
 from typing import Optional, Tuple
 
 import numpy as np
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QElapsedTimer, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -121,6 +121,16 @@ class TimelineCanvas(QWidget):
         self.SNAP_THRESHOLD = 0.15
         self.tool_mode = "select"  # "select" | "razor"
 
+        # 视野滚动过渡动画：seek/播放开始时丝滑滑向跟随位置，而不是跳变
+        self.PLAYHEAD_ANCHOR = 0.85  # 跟随锚点：播放头在视野中的目标位置比例
+        self.SCROLL_ANIM_MS = 250
+        self.SCROLL_ANIM_THRESHOLD = 0.25  # offset 偏差超过该秒数才启动动画
+        self._scroll_anim_start = 0.0
+        self._scroll_anim_clock = QElapsedTimer()
+        self._scroll_anim_timer = QTimer(self)
+        self._scroll_anim_timer.setInterval(16)
+        self._scroll_anim_timer.timeout.connect(self._on_scroll_anim)
+
         # 剃刀工具悬浮预览
         self._razor_preview_pos: Optional[QPoint] = None
         self._razor_preview_text: tuple[str, str] = ("", "")
@@ -152,9 +162,11 @@ class TimelineCanvas(QWidget):
         self.update()
 
     def _ensure_playhead_visible(self):
-        """播放头到达视野 65% 后钉住不动，波形在其下向左滚动；用户拖拽时不触发。
+        """视野跟随：播放头在视野内且未越过锚点（85% 处）时视野不动；
+        越过锚点后钉在锚点上，波形在其下滚动。
 
-        直接钉住而非缓动逼近：缓动会让播放头永远追不到稳定点，看起来在晃动。
+        正常播放时目标每帧只微移，直接钉住（缓动逼近会让播放头晃动）；
+        seek/播放开始等大跳转用短动画丝滑过渡。用户拖拽平移时不触发。
         """
         if self.dragging and self.drag_mode == "pan":
             return
@@ -162,7 +174,43 @@ class TimelineCanvas(QWidget):
         vis_duration = vis_end - vis_start
         if vis_duration <= 0:
             return
-        self.offset = max(0.0, self.playhead_time - vis_duration * 0.65)
+        if self._scroll_anim_timer.isActive():
+            return  # 过渡动画进行中，由定时器驱动 offset
+        anchor = self.offset + vis_duration * self.PLAYHEAD_ANCHOR
+        if self.offset <= self.playhead_time < anchor:
+            return  # 播放头在锚点左侧的视野内，视野保持不动
+        target = max(0.0, self.playhead_time - vis_duration * self.PLAYHEAD_ANCHOR)
+        if abs(target - self.offset) > self.SCROLL_ANIM_THRESHOLD:
+            self._start_scroll_anim()
+        else:
+            self.offset = target
+
+    def _start_scroll_anim(self):
+        self._scroll_anim_start = self.offset
+        self._scroll_anim_clock.start()
+        self._scroll_anim_timer.start()
+
+    def _on_scroll_anim(self):
+        if self.dragging and self.drag_mode == "pan":
+            self._scroll_anim_timer.stop()
+            return
+        vis_start, vis_end = self._get_visible_time_range()
+        vis_duration = vis_end - vis_start
+        if vis_duration <= 0:
+            self._scroll_anim_timer.stop()
+            return
+        # 目标随播放头实时重算：动画中再次 seek 不需要重启动画
+        target = max(0.0, self.playhead_time - vis_duration * self.PLAYHEAD_ANCHOR)
+        t = self._scroll_anim_clock.elapsed() / self.SCROLL_ANIM_MS
+        if t >= 1.0:
+            self._scroll_anim_timer.stop()
+            self.offset = target
+        else:
+            # smoothstep 缓动，末端精确落在目标上，无残差晃动
+            e = t * t * (3.0 - 2.0 * t)
+            self.offset = self._scroll_anim_start + (target - self._scroll_anim_start) * e
+        self.offset = max(0.0, self.offset)
+        self.update()
 
     def refresh_waveform(self):
         """使波形缓存失效（换音频/窗口尺寸变化时调用）。
@@ -674,10 +722,21 @@ class TimelineCanvas(QWidget):
             elif self.drag_mode == "move_subtitle":
                 dx = x - self.drag_start_x
                 delta = dx / self.zoom
+                duration = self.drag_original_end - self.drag_original_start
                 raw_start = self.drag_original_start + delta
+                raw_end = raw_start + duration
+                # 左右边缘都参与磁吸，两边同时命中时取吸附量更小的一边
                 snapped_start = self._find_snap_time(raw_start, self.drag_subtitle_index)
-                if snapped_start != raw_start:
+                snapped_end = self._find_snap_time(raw_end, self.drag_subtitle_index)
+                start_snapped = snapped_start != raw_start
+                end_snapped = snapped_end != raw_end
+                if start_snapped and (
+                    not end_snapped
+                    or abs(snapped_start - raw_start) <= abs(snapped_end - raw_end)
+                ):
                     delta = snapped_start - self.drag_original_start
+                elif end_snapped:
+                    delta = snapped_end - duration - self.drag_original_start
                 if self.drag_original_start + delta < 0:
                     delta = -self.drag_original_start
                 self.drag_delta_time = delta

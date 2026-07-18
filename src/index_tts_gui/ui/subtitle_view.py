@@ -51,6 +51,7 @@ from index_tts_gui.core.subtitler import (
     entries_to_srt,
 )
 from index_tts_gui.core.io_ass import entries_to_ass
+from index_tts_gui.core.merger import collect_sentence_wavs
 from index_tts_gui.ui.audio_engine import AudioEngine
 from index_tts_gui.ui.audio_load_worker import AudioLoadWorker
 from index_tts_gui.ui.timeline_canvas import TimelineCanvas
@@ -101,7 +102,9 @@ class SubtitlePanel(QWidget):
         self._setup_ui()
         self._connect_signals()
         self._refresh_project_audio()
-        self._try_auto_load_subtitles()
+        # 启动时走完整的保存字幕加载流程：有保存字幕直接加载，
+        # 没有才由它内部回退到后台重建（_try_auto_load_subtitles）
+        self._load_saved_subtitles()
 
     # ── UI ──
 
@@ -383,7 +386,11 @@ class SubtitlePanel(QWidget):
     # ── 音频 ──
 
     def _refresh_project_audio(self):
-        """切换工程后自动在后台加载 full_dub.wav 波形，避免阻塞主线程。"""
+        """切换工程后自动在后台加载 full_dub.wav 波形，避免阻塞主线程。
+
+        始终加载原始 full_dub.wav（而不是校准后的音频），与默认加载的
+        原始字幕保持成对一致。
+        """
         self._stop()
         self._audio_path = ""
         self._audio_engine.clear()
@@ -391,9 +398,7 @@ class SubtitlePanel(QWidget):
         self._player.setSource(QUrl())
 
         output_dir = self._output_dir()
-        auto_path = getattr(self._project, "calibrated_audio_path", "") if self._project else ""
-        if not auto_path or not os.path.exists(auto_path):
-            auto_path = os.path.join(output_dir, "full_dub.wav")
+        auto_path = os.path.join(output_dir, "full_dub.wav")
         if os.path.exists(auto_path):
             self._load_audio_path(auto_path)
         else:
@@ -404,11 +409,20 @@ class SubtitlePanel(QWidget):
             self._btn_stop.setEnabled(False)
 
     def _load_saved_subtitles(self):
-        """优先从 project.json 中加载已保存的字幕；没有则尝试后台重建。"""
+        """默认加载与 full_dub.wav 成对的原始字幕。
+
+        校准后 project.subtitles 存的是校准字幕，subtitles_original 存的
+        才是原始字幕；优先取后者，保证重新打开时默认视图自洽。
+        """
         if self._project is None:
             return
-        saved = getattr(self._project, "subtitles", None)
-        if saved:
+        candidates = [
+            getattr(self._project, "subtitles_original", None),
+            getattr(self._project, "subtitles", None),
+        ]
+        for saved in candidates:
+            if not saved:
+                continue
             try:
                 entries = [SubtitleEntry(**item) for item in saved]
                 self.load_entries(entries, auto_load_audio=False)
@@ -416,14 +430,27 @@ class SubtitlePanel(QWidget):
                 return
             except Exception as e:
                 logger.warning("加载保存的字幕失败: %s", e)
+        # 保存的数据均不可用，清空以允许后台重建兜底
+        self._project.subtitles_original = []
+        self._project.subtitles = []
         self._try_auto_load_subtitles()
 
     def _save_subtitles_to_project(self):
-        """将当前字幕保存到 project.json。"""
+        """将当前字幕保存到 project.json。
+
+        校准视图（track.name == "校准后"）只写 subtitles，不动原始备份；
+        其他视图同时同步 subtitles_original，避免下次打开被旧备份遮蔽。
+        """
         if self._project is None or self._track is None:
             return
         entries = self._track.to_entries()
-        self._project.subtitles = [e.__dict__ for e in entries]
+        data = [e.__dict__ for e in entries]
+        self._project.subtitles = data
+        self._project.subtitle_style = self._track.default_style.__dict__.copy()
+        if self._track.name != "校准后" and getattr(
+            self._project, "subtitles_original", None
+        ):
+            self._project.subtitles_original = data
         try:
             self._project.save()
         except Exception as e:
@@ -434,15 +461,17 @@ class SubtitlePanel(QWidget):
         self._save_subtitles_to_project()
 
     def _try_auto_load_subtitles(self):
-        """打开工程后后台自动从已有 WAV 重建字幕。"""
+        """打开工程后后台自动从已有 WAV 重建字幕（仅无保存字幕时的兜底）。
+
+        已有保存字幕时必须跳过：后台重建较慢，若放任其结果后到达，
+        会覆盖并回写掉 project.json 里已保存的正确时间戳。
+        """
         if not self._project or not self._project.sentences:
             return
+        if getattr(self._project, "subtitles", None):
+            return
         output_dir = self._output_dir()
-        wavs = sorted([
-            os.path.join(output_dir, f)
-            for f in os.listdir(output_dir)
-            if f.startswith("sentence_") and f.endswith(".wav")
-        ])
+        wavs = collect_sentence_wavs(output_dir)
         if len(wavs) != len(self._project.sentences):
             return
         pauses = self._project.pauses if self._project.pauses else None
@@ -774,6 +803,7 @@ class SubtitlePanel(QWidget):
     def load_entries(self, entries: List[SubtitleEntry], auto_load_audio: bool = True):
         """载入字幕条目（与合成流水线兼容），并可选刷新 full_dub.wav 音频。"""
         self._track = SubtitleTrack.from_entries(entries)
+        self._apply_saved_style()
         self._undo_stack.clear()
         self._timeline.set_subtitle_track(self._track)
 
@@ -791,6 +821,17 @@ class SubtitlePanel(QWidget):
 
     def get_entries(self) -> List[SubtitleEntry]:
         return self._track.to_entries()
+
+    def _apply_saved_style(self):
+        """把 project.json 里保存的全局样式套到当前轨道（如果有）。"""
+        saved = getattr(self._project, "subtitle_style", None) if self._project else None
+        if not saved:
+            return
+        try:
+            self._track.default_style = SubtitleStyle(**saved)
+            self._load_style_controls()
+        except Exception as e:
+            logger.warning("加载保存的字幕样式失败: %s", e)
 
     # ── 表格 ──
 
@@ -972,7 +1013,13 @@ class SubtitlePanel(QWidget):
         if not self._undo_stack:
             return
         snapshot = self._undo_stack.pop()
+        # from_entries 会重置 name/default_style：必须保留，
+        # 否则校准视图下撤销后保存会污染 subtitles_original，且样式丢失
+        name = self._track.name
+        style = self._track.default_style
         self._track = SubtitleTrack.from_entries(snapshot)
+        self._track.name = name
+        self._track.default_style = style
         self._current_edit_index = -1
         self._text_edit.clear()
         self.refresh_table()
@@ -1259,9 +1306,12 @@ class SubtitlePanel(QWidget):
         )
         self._btn_calibrate.setEnabled(can_calibrate)
 
+        # 仅在校准视图下显示"回到原始字幕"：默认视图本身就是原始字幕
         has_original = bool(
             self._project is not None
             and getattr(self._project, "subtitles_original", None)
+            and self._track is not None
+            and self._track.name == "校准后"
         )
         self._btn_restore_original.setVisible(has_original)
 
@@ -1345,12 +1395,17 @@ class SubtitlePanel(QWidget):
             return
 
         self._push_undo()
+        style = self._track.default_style
         self._track = SubtitleTrack.from_entries(entries)
         self._track.name = "校准后"
+        self._track.default_style = style
         self._current_edit_index = -1
         self._text_edit.clear()
 
-        if self._project and self._undo_stack:
+        if self._project and self._undo_stack and not getattr(
+            self._project, "subtitles_original", None
+        ):
+            # 只在为空时写入：重复校准不能用上一轮的校准结果覆盖真正的原始字幕
             self._project.subtitles_original = [
                 e.__dict__ for e in self._undo_stack[-1]
             ]
@@ -1389,8 +1444,10 @@ class SubtitlePanel(QWidget):
             return
         self._push_undo()
         entries = [SubtitleEntry(**item) for item in original]
+        style = self._track.default_style
         self._track = SubtitleTrack.from_entries(entries)
         self._track.name = "原始"
+        self._track.default_style = style
         self._current_edit_index = -1
         self._text_edit.clear()
         self.refresh_table()
