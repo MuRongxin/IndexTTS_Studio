@@ -10,6 +10,10 @@ from index_tts_gui.core.splitter import RuleBasedSplitter
 logger = logging.getLogger("index_tts")
 
 
+class _SplitCanceled(Exception):
+    """拆分被用户取消（内部控制流，不作为错误上报）。"""
+
+
 class SplitWorker(QThread):
     """后台执行文本拆分。"""
 
@@ -31,11 +35,23 @@ class SplitWorker(QThread):
         self._mode = mode
         self._llm_cfg = llm_cfg or {}
         self._max_length = max_length
+        self._canceled = False
+
+    def cancel(self):
+        """请求取消：在分块进度回调等安全点生效，不发任何结果信号。"""
+        self._canceled = True
+
+    def _on_chunk_progress(self, c: int, t: int, m: str):
+        if self._canceled:
+            raise _SplitCanceled()
+        self.progress.emit(c, t, m)
 
     def run(self):
         self.started.emit()
         mode = self._mode.lower().strip()
         try:
+            if self._canceled:
+                return
             if mode == "rule":
                 sentences = RuleBasedSplitter(self._max_length).split(self._text)
                 self.finished.emit(sentences, False, "规则拆分完成")
@@ -53,8 +69,10 @@ class SplitWorker(QThread):
             try:
                 sentences = service.split_text(
                     self._text, self._max_length,
-                    on_progress=lambda c, t, m: self.progress.emit(c, t, m),
+                    on_progress=self._on_chunk_progress,
                 )
+                if self._canceled:
+                    return
                 self.finished.emit(sentences, True, "LLM 拆分完成")
             except LLMServiceError as e:
                 if mode == "llm":
@@ -63,6 +81,8 @@ class SplitWorker(QThread):
                 sentences = RuleBasedSplitter(self._max_length).split(self._text)
                 self.finished.emit(sentences, False, f"LLM 失败({e})，已回退规则拆分")
 
+        except _SplitCanceled:
+            return
         except LLMServiceError as e:
             logger.exception("LLM 拆分失败")
             if mode in ("llm", "auto"):

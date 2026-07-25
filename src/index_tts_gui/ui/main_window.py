@@ -16,7 +16,7 @@ from index_tts_gui.core.tts_client import (
     DEFAULT_API_URL,
     DEFAULT_TIMEOUT,
 )
-from index_tts_gui.core.project import Project
+from index_tts_gui.core.project import Project, PROJECT_FILE
 from index_tts_gui.ui.editor import ManuscriptPanel
 from index_tts_gui.ui.synthesis_panel import SynthesisPanel
 from index_tts_gui.ui.subtitle_view import SubtitlePanel
@@ -365,6 +365,15 @@ class MainWindow(QMainWindow):
             return
         loaded = Project.load(project_dir)
         if loaded is None:
+            project_file = os.path.join(project_dir, PROJECT_FILE)
+            if os.path.exists(project_file):
+                # 文件存在但解析失败：提示损坏，不提供会覆盖原文件的创建路径
+                QMessageBox.critical(
+                    self, "工程文件损坏",
+                    f"工程文件损坏，无法加载：\n{project_file}\n\n"
+                    "为避免数据丢失未做任何改动，请人工检查修复。"
+                )
+                return
             # 如果目录没有 project.json，询问是否在此创建新工程
             reply = QMessageBox.question(
                 self, "创建工程",
@@ -420,11 +429,23 @@ class MainWindow(QMainWindow):
         """合并完成后加载字幕并跳转到字幕页。"""
         self.subtitle_panel.load_entries(entries)
         self._project.subtitles = [e.__dict__ for e in entries]
+        # 新音频对应新的原始时间轴，旧的校准残留一并失效
+        self._project.subtitles_original = []
+        self._project.calibrated_audio_path = ""
         self._project.save()
         self._set_current_page(2)
         self.status_bar.showMessage(f"字幕已生成并加载: {len(entries)} 条")
 
     def closeEvent(self, event):
+        # 先取消各面板的后台任务，避免退出时 QThread 运行中被销毁而 abort
+        for panel_name in ("manuscript_panel", "synthesis_panel", "subtitle_panel"):
+            panel = getattr(self, panel_name, None)
+            cancel = getattr(panel, "cancel_workers", None) if panel else None
+            if callable(cancel):
+                try:
+                    cancel()
+                except Exception as e:
+                    logger.warning("取消后台任务失败 %s: %s", panel_name, e)
         self._save_window_state()
         self._save_last_project_dir()
         if hasattr(self, "subtitle_panel"):

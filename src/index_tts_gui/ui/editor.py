@@ -1,4 +1,5 @@
 """文稿编辑面板"""
+import logging
 import os
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QPlainTextEdit,
@@ -13,6 +14,8 @@ from PySide6.QtGui import QKeyEvent
 from index_tts_gui.ui.split_worker import SplitWorker
 from index_tts_gui.core.project import Project
 
+
+logger = logging.getLogger("index_tts")
 
 PUNCT = '。！？，、；：'
 
@@ -283,9 +286,24 @@ class ManuscriptPanel(QWidget):
     def set_llm_config(self, cfg: dict):
         """外部注入 LLM 配置。"""
         self._llm_cfg = cfg or {}
+        self._update_mode_availability()
+
+    def _update_mode_availability(self):
+        """按 llm.enabled 启用/禁用 LLM 相关拆分模式。"""
+        enabled = self._llm_cfg.get("enabled", True)
+        model = self._mode_combo.model()
+        for text in ("LLM", "自动"):
+            idx = self._mode_combo.findText(text)
+            if idx >= 0:
+                model.item(idx).setEnabled(enabled)
+        if not enabled and self._mode_combo.currentText() in ("LLM", "自动"):
+            self._mode_combo.setCurrentText("规则")
 
     def set_project(self, project: Project):
         """切换工程时刷新数据。"""
+        # 取消运行中的拆分：结果里带有旧工程文稿，不得写入新工程
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.cancel()
         # 切换期间临时断开保存型信号，避免加载旧数据时触发写入
         self._editor.blockSignals(True)
         self._table.blockSignals(True)
@@ -358,11 +376,10 @@ class ManuscriptPanel(QWidget):
         self._table.viewport().update()
 
     def _load_from_project(self):
-        """启动时从工程加载文稿和拆分结果。"""
+        """启动时从工程加载文稿和拆分结果（空工程清空，不残留上一工程）。"""
         source = self._project.source_text
         sentences = self._project.sentences
-        if source:
-            self._editor.setPlainText(source)
+        self._editor.setPlainText(source or "")
         if sentences:
             self._load_table(sentences)
             self.sentences_ready.emit(self._sentences)
@@ -370,6 +387,7 @@ class ManuscriptPanel(QWidget):
                 f"已加载工程「{self._project.name}」：{len(sentences)} 句"
             )
         else:
+            self._load_table([])
             self._status_label.setText(
                 f"已加载工程「{self._project.name}」"
             )
@@ -437,7 +455,6 @@ class ManuscriptPanel(QWidget):
 
         self._btn_split.setEnabled(False)
         self._status_label.setText("正在拆分…")
-        self._load_table([])
 
         if self._worker is not None:
             try:
@@ -457,6 +474,7 @@ class ManuscriptPanel(QWidget):
             llm_cfg=self._llm_cfg,
             max_length=self._max_len_spin.value(),
         )
+        self._worker.setProperty("project_dir", self._project.project_dir)
         self._worker.progress.connect(self._on_split_progress)
         self._worker.finished.connect(self._on_split_finished)
         self._worker.finished.connect(self._on_worker_lifetime_finished)
@@ -467,6 +485,17 @@ class ManuscriptPanel(QWidget):
 
     def _on_split_finished(self, sentences: list, used_llm: bool, msg: str):
         self._btn_split.setEnabled(True)
+        # 工程已切换时丢弃旧文稿的拆分结果
+        sender = self.sender()
+        expected = sender.property("project_dir") if sender is not None else ""
+        if expected and expected != self._project.project_dir:
+            logger.warning("工程已切换，丢弃旧拆分结果")
+            return
+        if not sentences:
+            # 拆分失败：保留已有句子，不用空结果覆盖工程数据
+            self._status_label.setText(msg)
+            QMessageBox.warning(self, "拆分失败", msg)
+            return
         self._load_table(sentences)
         self._status_label.setText(msg)
         self._save_sentences_to_project()
@@ -477,6 +506,19 @@ class ManuscriptPanel(QWidget):
         if self._worker is not None:
             self._worker.deleteLater()
             self._worker = None
+
+    def cancel_workers(self):
+        """取消运行中的拆分任务（应用退出时由主窗口调用）。"""
+        if self._worker is not None and self._worker.isRunning():
+            try:
+                self._worker.disconnect()
+            except Exception:
+                pass
+            self._worker.cancel()
+            self._worker.wait(2000)
+            if self._worker.isRunning():
+                self._worker.terminate()
+                self._worker.wait(1000)
 
     def _split_at_cursor(self, cursor_pos: int):
         """在当前编辑行的 cursor_pos 处切分。"""

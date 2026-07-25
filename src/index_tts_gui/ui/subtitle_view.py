@@ -272,6 +272,17 @@ class SubtitlePanel(QWidget):
         self._btn_strip_punct.clicked.connect(self._strip_all_punctuation)
         btn_row.addWidget(self._btn_strip_punct)
 
+        self._btn_snap = QPushButton("🧲 磁吸")
+        self._btn_snap.setToolTip("拖动字幕块时吸附到其他块的边缘")
+        self._btn_snap.setCheckable(True)
+        self._btn_snap.setChecked(True)
+        btn_row.addWidget(self._btn_snap)
+
+        self._btn_offset = QPushButton("↔ 偏移")
+        self._btn_offset.setToolTip("将选中字幕及其之前/之后的所有字幕整体前移或后移")
+        self._btn_offset.setEnabled(False)
+        btn_row.addWidget(self._btn_offset)
+
         btn_row.addStretch()
 
         self._btn_calibrate = QPushButton("🔄 校准字幕")
@@ -359,6 +370,8 @@ class SubtitlePanel(QWidget):
         self._btn_split.clicked.connect(self._split_selected)
         self._btn_merge.clicked.connect(self._merge_selected)
         self._btn_delete.clicked.connect(self._delete_selected)
+        self._btn_snap.toggled.connect(self._on_snap_toggled)
+        self._btn_offset.clicked.connect(self._offset_subtitles)
         self._btn_export.clicked.connect(self._export_srt)
         self._btn_export_ass.clicked.connect(self._export_ass)
         self._btn_calibrate.clicked.connect(self._calibrate_subtitles)
@@ -459,6 +472,36 @@ class SubtitlePanel(QWidget):
     def save_subtitles(self):
         """公共入口：保存当前字幕到 project.json。"""
         self._save_subtitles_to_project()
+
+    def cancel_workers(self):
+        """停止后台任务与播放器（应用退出时由主窗口调用）。"""
+        try:
+            self._player.stop()
+        except Exception:
+            pass
+        try:
+            self._smooth_timer.stop()
+        except Exception:
+            pass
+        for worker in (
+            self._regen_worker,
+            self._calibrate_worker,
+            self._audio_load_worker,
+        ):
+            if worker is None:
+                continue
+            try:
+                worker.disconnect()
+            except Exception:
+                pass
+            cancel = getattr(worker, "cancel", None)
+            if callable(cancel):
+                cancel()
+            if worker.isRunning():
+                worker.wait(2000)
+            if worker.isRunning():
+                worker.terminate()
+                worker.wait(1000)
 
     def _try_auto_load_subtitles(self):
         """打开工程后后台自动从已有 WAV 重建字幕（仅无保存字幕时的兜底）。
@@ -688,6 +731,8 @@ class SubtitlePanel(QWidget):
                 self.select_row(indices[-1])
         finally:
             self._block_signals = False
+        # 表格信号被屏蔽，按钮状态需手动刷新（否则多选后合并按钮不亮）
+        self._update_button_states()
 
     def _on_timeline_subtitle_moved(self, index: int, start: float, end: float):
         self._push_undo()
@@ -1220,6 +1265,68 @@ class SubtitlePanel(QWidget):
 
     # ── 切分/合并/删除 ──
 
+    def _on_snap_toggled(self, checked: bool):
+        """磁吸开关：拖动字幕块时是否吸附到其他块的边缘。"""
+        self._timeline.snap_enabled = checked
+
+    def _offset_subtitles(self):
+        """偏移字幕：将选中字幕及其之前/之后的所有字幕整体前移/后移。"""
+        if self._current_edit_index < 0:
+            return
+        item = self._track.get_item(self._current_edit_index)
+        if item is None:
+            return
+
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout
+        dlg = QDialog(self)
+        dlg.setWindowTitle("偏移字幕")
+        form = QFormLayout(dlg)
+        scope_combo = QComboBox(dlg)
+        scope_combo.addItems(["之后（含本条）", "之前（含本条）"])
+        dir_combo = QComboBox(dlg)
+        dir_combo.addItems(["后移", "前移"])
+        secs = QDoubleSpinBox(dlg)
+        secs.setRange(0.01, 999.0)
+        secs.setSingleStep(0.1)
+        secs.setValue(0.5)
+        secs.setSuffix(" 秒")
+        form.addRow("范围", scope_combo)
+        form.addRow("方向", dir_combo)
+        form.addRow("时间", secs)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dlg
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        form.addRow(buttons)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        delta = secs.value() * (1 if dir_combo.currentText() == "后移" else -1)
+        after = scope_combo.currentIndex() == 0
+        self._apply_offset(item, delta, after)
+
+    def _apply_offset(self, item: SubtitleItem, delta: float, after: bool):
+        """对 item 及其之后（after=True）/之前的所有字幕平移 delta 秒。
+
+        每条时长保持不变，起点钳到 0；支持撤销。
+        """
+        self._push_undo()
+        pivot = item.index
+        for it in self._track.items:
+            in_scope = it.index >= pivot if after else it.index <= pivot
+            if not in_scope:
+                continue
+            dur = it.duration
+            it.start_time = max(0.0, it.start_time + delta)
+            it.end_time = it.start_time + dur
+        self._track.sort()
+        self._track.reindex()
+        self.refresh_table()
+        self._timeline.set_subtitle_track(self._track)
+        self.select_row(item.index)
+        self._update_button_states()
+
     def _split_selected(self):
         self._push_undo()
         if self._current_edit_index < 0:
@@ -1291,6 +1398,7 @@ class SubtitlePanel(QWidget):
         has_selection = self._current_edit_index >= 0
         self._btn_split.setEnabled(has_selection)
         self._btn_delete.setEnabled(has_selection)
+        self._btn_offset.setEnabled(has_selection)
 
         selected_count = len(set(item.row() for item in self._table.selectedItems()))
         selected_count = max(selected_count, len(self._timeline.get_selected_indices()))

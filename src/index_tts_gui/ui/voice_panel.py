@@ -64,6 +64,7 @@ class VoicePanel(QWidget):
     """音色管理：拖放参考音频 + 试听 + 上传"""
 
     audio_uploaded = Signal(str)  # 上传成功后发射音频名
+    audio_removed = Signal()      # 当前使用中的音色被移除
     segment_regenerate = Signal(int)  # 请求重新合成某句（index）
     voice_log = Signal(str)       # 日志消息（转发到合成面板）
 
@@ -91,6 +92,9 @@ class VoicePanel(QWidget):
 
     def _load_default_audio(self):
         """启动时默认加载根目录参考音频，不存在则加载项目目录下第一个 WAV。"""
+        # 工程已记录音色时不设置默认，避免每次启动覆盖用户选择
+        if self._project and self._project.audio_name:
+            return
         default = os.path.join(os.getcwd(), "作为愚人众的十一执行官.wav")
         if os.path.exists(default):
             self._load_audio(default)
@@ -164,8 +168,10 @@ class VoicePanel(QWidget):
         ref_col.setSpacing(4)
 
         self._audio_list_widget = QListWidget()
-        self._audio_list_widget.setAcceptDrops(True)
+        # 顺序敏感：setDragDropMode(NoDragDrop) 内部会把 acceptDrops 置 False，
+        # 必须先设模式再开 acceptDrops，否则拖放完全失效
         self._audio_list_widget.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
+        self._audio_list_widget.setAcceptDrops(True)
         self._audio_list_widget.setAlternatingRowColors(True)
         self._audio_list_widget.setSelectionMode(QAbstractItemView.SingleSelection)
         self._audio_list_widget.currentRowChanged.connect(self._on_audio_list_selected)
@@ -186,6 +192,8 @@ class VoicePanel(QWidget):
             }
         """)
         self._audio_list_widget.installEventFilter(self)
+        # 拖放/双击事件的投递目标是 viewport，不装过滤器则空白区无响应
+        self._audio_list_widget.viewport().installEventFilter(self)
         ref_col.addWidget(self._audio_list_widget, 1)
 
         self._ref_speed_panel = QFrame()
@@ -299,6 +307,8 @@ class VoicePanel(QWidget):
             QPushButton:disabled { background: #ccc; }
         """)
         self._btn_upload.clicked.connect(self._upload)
+        # 加入布局：之前只创建未入布局，空列表时没有可用的上传入口
+        layout.addWidget(self._btn_upload)
 
         # 播放器事件
         self._player.playbackStateChanged.connect(self._on_playback_changed)
@@ -445,6 +455,11 @@ class VoicePanel(QWidget):
             self._btn_upload.setEnabled(False)
             self._upload_status.setText("")
             self._player.stop()
+            # 同步工程的音色记录并通知合成面板，避免用已删除的音色合成
+            if self._project.audio_name:
+                self._project.audio_name = ""
+                self._project.save()
+            self.audio_removed.emit()
 
     def _refresh_audio_list_ui(self):
         """从工程数据刷新列表 UI（切换工程时调用）。"""
@@ -715,3 +730,23 @@ class VoicePanel(QWidget):
 
     def get_audio_name(self) -> str:
         return self._audio_name
+
+    def cancel_workers(self):
+        """停止上传任务与播放器（应用退出时由主窗口调用）。"""
+        try:
+            self._player.stop()
+        except Exception:
+            pass
+        if self._worker is not None:
+            try:
+                self._worker.disconnect()
+            except Exception:
+                pass
+            cancel = getattr(self._worker, "cancel", None)
+            if callable(cancel):
+                cancel()
+            if self._worker.isRunning():
+                self._worker.wait(2000)
+            if self._worker.isRunning():
+                self._worker.terminate()
+                self._worker.wait(1000)

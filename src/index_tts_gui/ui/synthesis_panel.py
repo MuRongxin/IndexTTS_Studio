@@ -13,7 +13,7 @@ from PySide6.QtCore import QThread, Signal
 
 from index_tts_gui.core.tts_client import BaseTTSClient, IndexTTSClient
 from index_tts_gui.core.project import Project
-from index_tts_gui.core.merger import collect_sentence_wavs, sanitize_for_filename
+from index_tts_gui.core.merger import collect_sentence_wavs, sanitize_for_filename, parse_sentence_wav_name
 from index_tts_gui.ui.merge_worker import MergeWorker
 from index_tts_gui.ui.synthesis_worker import SynthesisWorker
 from index_tts_gui.ui.voice_panel import VoicePanel
@@ -53,6 +53,16 @@ class SingleSynthesisWorker(QThread):
             self.log.emit(
                 f"🔄 开始重新合成第 {self._index + 1} 句 → {os.path.basename(wav_path)}"
             )
+            # 写新 WAV 前删除同序号的旧文件，避免改文本后残留旧文件导致合并数量不一致
+            for old_path in glob.glob(
+                os.path.join(self._output_dir, f"sentence_{self._index + 1:02d}_*.wav")
+            ):
+                if old_path == wav_path:
+                    continue
+                try:
+                    os.remove(old_path)
+                except Exception:
+                    pass
             audio_bytes = self._client.synthesize(self._sentence, self._audio_name)
             with open(wav_path, "wb") as f:
                 f.write(audio_bytes)
@@ -90,6 +100,7 @@ class SynthesisPanel(QWidget):
 
         self._voice_panel = VoicePanel(self._project, self._client)
         self._voice_panel.audio_uploaded.connect(self.set_audio_name)
+        self._voice_panel.audio_removed.connect(self._on_audio_removed)
         self._voice_panel.segment_regenerate.connect(self._on_segment_regenerate_request)
         self._voice_panel.segment_preview.connect(self._preview_wav)
         self._voice_panel.voice_log.connect(self._log_msg)
@@ -256,6 +267,10 @@ class SynthesisPanel(QWidget):
         self._project.audio_name = name
         self._project.save()
 
+    def _on_audio_removed(self):
+        """当前音色被移除：清空本地引用，避免用已删除的音色合成。"""
+        self._audio_name = ""
+
     def set_llm_config(self, cfg: dict):
         """外部注入 LLM 配置，用于智能停顿建议。"""
         self._llm_cfg = cfg or {}
@@ -335,6 +350,10 @@ class SynthesisPanel(QWidget):
         if not self._audio_name:
             self._log_msg("⚠ 请先在音色面板上传参考音频")
             return
+        # 先确认能启动，再做 _diff_sentences 的破坏性清理
+        if self._worker is not None and self._worker.isRunning():
+            self._log_msg("⚠ 已有合成任务在运行")
+            return
 
         # 对比句子变化，仅合成已变/新增的句子
         unchanged, changed, new_sentences = self._diff_sentences()
@@ -350,11 +369,11 @@ class SynthesisPanel(QWidget):
             self._log_msg("⚠ 没有需要合成的句子")
             return
 
-        if self._worker is not None and self._worker.isRunning():
-            self._log_msg("⚠ 已有合成任务在运行")
-            return
-
         self._voice_panel.clear_segments()
+        # 隐藏单句操作按钮，防止批量合成中触发单句重生成并发写同一 WAV
+        self._regen_index = -1
+        self._btn_preview_single.setVisible(False)
+        self._btn_regen_single.setVisible(False)
         self._was_canceled = False
         self._progress.setValue(0)
         self._progress.setMaximum(len(indices_to_synth))
@@ -362,6 +381,7 @@ class SynthesisPanel(QWidget):
         self._btn_stop.setEnabled(True)
         self._btn_merge.setEnabled(False)
         self._btn_refresh_pauses.setEnabled(False)
+        self._btn_clear_output.setEnabled(False)
         self._log.clear()
 
         if self._worker is not None:
@@ -374,6 +394,7 @@ class SynthesisPanel(QWidget):
             self._output_dir, self._client,
             indices=indices_to_synth,
         )
+        self._worker.setProperty("project_dir", self._project.project_dir)
         self._worker.progress.connect(self._on_progress)
         self._worker.sentence_done.connect(self._on_sentence_done)
         self._worker.log.connect(self._log_msg)
@@ -430,10 +451,19 @@ class SynthesisPanel(QWidget):
     def _on_finished(self, wav_map=None):
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
+        self._btn_clear_output.setEnabled(True)
+
+        # 工程已切换时丢弃旧工程的结果，防止串写新工程
+        sender = self.sender()
+        expected = sender.property("project_dir") if sender is not None else ""
+        if expected and expected != self._project.project_dir:
+            logger.warning("工程已切换，丢弃旧合成结果")
+            return
 
         if self._was_canceled:
             self._status_label.setText("已停止")
             self._log_msg("━━━━━━━━━━ 已取消 ━━━━━━━━━━")
+            self._refresh_merge_button()
             return
 
         # 保存 WAV 映射（只保留当前 sentences 范围内的条目）
@@ -504,11 +534,16 @@ class SynthesisPanel(QWidget):
             return
         if index < 0 or index >= len(self._sentences):
             return
+        if self._single_worker is not None and self._single_worker.isRunning():
+            self._log_msg("⚠ 已有单句合成在运行，请稍候")
+            return
 
         if self._single_worker is not None:
             self._disconnect_worker(self._single_worker)
+            self._single_worker.deleteLater()
             self._single_worker = None
 
+        self._btn_regen_single.setEnabled(False)
         self._single_worker = SingleSynthesisWorker(
             index=index,
             sentence=self._sentences[index],
@@ -516,6 +551,7 @@ class SynthesisPanel(QWidget):
             output_dir=self._output_dir,
             client=self._client,
         )
+        self._single_worker.setProperty("project_dir", self._project.project_dir)
         self._single_worker.log.connect(self._log_msg)
         self._single_worker.success.connect(self._on_single_synth_success)
         self._single_worker.error.connect(self._on_single_synth_error)
@@ -523,6 +559,12 @@ class SynthesisPanel(QWidget):
         self._single_worker.start()
 
     def _on_single_synth_success(self, index: int, wav_path: str):
+        # 工程已切换时丢弃旧结果
+        sender = self.sender()
+        expected = sender.property("project_dir") if sender is not None else ""
+        if expected and expected != self._project.project_dir:
+            logger.warning("工程已切换，丢弃旧单句合成结果")
+            return
         # 更新 WAV 映射，只保留当前 sentences 范围内的条目
         valid_indices = set(range(len(self._sentences)))
         existing = {
@@ -549,6 +591,7 @@ class SynthesisPanel(QWidget):
         if self._single_worker is not None:
             self._single_worker.deleteLater()
             self._single_worker = None
+        self._btn_regen_single.setEnabled(True)
 
     def _log_msg(self, msg: str):
         self._log.appendPlainText(msg)
@@ -607,20 +650,19 @@ class SynthesisPanel(QWidget):
             self._sentences, self._output_dir, self._llm_cfg,
             pauses=reusable_pauses,
         )
+        self._merge_worker.setProperty("project_dir", self._project.project_dir)
         self._merge_worker.log.connect(self._log_msg)
         self._merge_worker.progress.connect(self._on_merge_progress)
         self._merge_worker.finished.connect(self._on_merge_finished)
         self._merge_worker.error.connect(self._on_merge_error)
         self._merge_worker.finished.connect(self._on_merge_worker_finished)
         self._merge_worker.error.connect(self._on_merge_worker_finished)
+        self._btn_clear_output.setEnabled(False)
         self._merge_worker.start()
 
     def _refresh_pauses(self):
-        """清空已保存的停顿建议，重新询问 LLM。"""
-        self._project.pauses = []
-        self._project.pauses_for_sentences = []
-        self._project.save()
-        self._log_msg("🔄 已清空停顿建议，下次合并将重新询问 LLM")
+        """重新询问 LLM 获取停顿建议（成功后才覆盖已保存的值，失败保留旧值）。"""
+        self._log_msg("🔄 正在重新获取 LLM 停顿建议…")
         self._merge_full_audio(force_refresh_pauses=True)
 
     def _on_merge_progress(self, current: int, total: int, message: str):
@@ -629,6 +671,13 @@ class SynthesisPanel(QWidget):
         self._status_label.setText(f"合并中 [{current}/{total}]: {message}")
 
     def _on_merge_finished(self, entries: list):
+        self._btn_clear_output.setEnabled(True)
+        # 工程已切换时丢弃旧合并结果，不写入新工程
+        sender = self.sender()
+        expected = sender.property("project_dir") if sender is not None else ""
+        if expected and expected != self._project.project_dir:
+            logger.warning("工程已切换，丢弃旧合并结果")
+            return
         self._progress.setValue(self._progress.maximum())
         self._status_label.setText(f"完整音频已生成: {self._output_dir}/full_dub.wav")
         self._btn_merge.setEnabled(True)
@@ -647,6 +696,7 @@ class SynthesisPanel(QWidget):
         self._status_label.setText("合并失败")
         self._btn_merge.setEnabled(True)
         self._btn_refresh_pauses.setEnabled(True)
+        self._btn_clear_output.setEnabled(True)
 
     def _on_merge_worker_finished(self):
         """worker 生命周期结束，安全清理引用，不访问其成员。"""
@@ -667,26 +717,22 @@ class SynthesisPanel(QWidget):
         self._dir_label.setText(project.output_dir)
         self._audio_name = project.audio_name
         self._voice_panel.set_project(project)
-        if project.sentences:
-            self.set_sentences(project.sentences)
+        # 空工程也要清空句子，避免残留上一工程内容被合成进新工程
+        self.set_sentences(project.sentences)
         self._refresh_segment_list()
         self._refresh_merge_button()
 
     def _refresh_segment_list(self):
         """扫描输出目录，将已有 WAV 文件显示在右侧片段列表。"""
         self._voice_panel.clear_segments()
-        if not os.path.isdir(self._output_dir):
-            return
-        from index_tts_gui.core.merger import parse_sentence_wav_name
-        wavs = sorted(
-            f for f in os.listdir(self._output_dir)
-            if f.startswith("sentence_") and f.endswith(".wav")
-        )
-        for f in wavs:
-            parsed = parse_sentence_wav_name(f)
+        # collect_sentence_wavs 按数字序号排序且容忍目录缺失，
+        # 字典序排序在 ≥100 句时会把 sentence_100 排到 sentence_99 前
+        for wav in collect_sentence_wavs(self._output_dir):
+            name = os.path.basename(wav)
+            parsed = parse_sentence_wav_name(name)
             # parse_sentence_wav_name 返回 1-based 序号
             idx_1based = parsed[0] if parsed else 0
-            self._voice_panel.add_segment(idx_1based, f)
+            self._voice_panel.add_segment(idx_1based, name)
 
     def reset_for_new_project(self):
         """新建工程时清空面板状态。"""
@@ -703,3 +749,25 @@ class SynthesisPanel(QWidget):
 
     def get_output_dir(self) -> str:
         return self._output_dir
+
+    def cancel_workers(self):
+        """取消所有后台任务（应用退出时由主窗口调用）。
+
+        断开结果信号防止退出过程中写盘，有 cancel() 的做友好取消；
+        有限等待后仍运行的线程 terminate 兜底，保证退出不 abort。
+        """
+        for worker in (self._worker, self._single_worker, self._merge_worker):
+            if worker is None:
+                continue
+            try:
+                worker.disconnect()
+            except Exception:
+                pass
+            cancel = getattr(worker, "cancel", None)
+            if callable(cancel):
+                cancel()
+            if worker.isRunning():
+                worker.wait(2000)
+            if worker.isRunning():
+                worker.terminate()
+                worker.wait(1000)

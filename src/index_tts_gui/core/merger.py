@@ -210,6 +210,9 @@ def parse_sentence_wav_name(name: str) -> tuple[int, str] | None:
 
 def collect_sentence_wavs(output_dir: str) -> list[str]:
     """按序号收集 output_dir 下的 sentence_*.wav 文件。"""
+    # 输出目录可能尚未创建（新工程/未合成），按无分句音频处理
+    if not os.path.isdir(output_dir):
+        return []
     files = []
     for name in os.listdir(output_dir):
         if parse_sentence_wav_name(name) is not None:

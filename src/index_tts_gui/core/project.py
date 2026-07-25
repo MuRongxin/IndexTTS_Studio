@@ -161,6 +161,13 @@ class Project:
         if project is not None:
             return project
 
+        # project.json 存在但解析失败：不得覆盖，否则本可人工修复的数据会被清零
+        if os.path.exists(os.path.join(project_dir, PROJECT_FILE)):
+            raise RuntimeError(
+                f"工程文件损坏，无法加载: {os.path.join(project_dir, PROJECT_FILE)}；"
+                "为避免数据丢失未做任何改动，请人工检查修复"
+            )
+
         # 新建工程，并做旧数据迁移
         project = cls(project_dir=project_dir, name=DEFAULT_PROJECT_NAME)
 

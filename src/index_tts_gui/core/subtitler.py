@@ -134,10 +134,13 @@ def entries_to_srt(entries: list[SubtitleEntry]) -> str:
     """将字幕条目转为 SRT 字符串"""
     def _fmt(sec: float) -> str:
         sec = max(0.0, sec)
-        h = int(sec // 3600)
-        m = int((sec % 3600) // 60)
-        s = int(sec % 60)
-        ms = round((sec % 1) * 1000) % 1000
+        # 先整体四舍五入到毫秒再分解：否则小数部分 ∈ [0.9995, 1.0) 时
+        # 毫秒向秒的进位会被 % 1000 丢弃（61.9996 会错成 00:01:01,000）
+        total_ms = round(sec * 1000)
+        h = total_ms // 3_600_000
+        m = (total_ms % 3_600_000) // 60_000
+        s = (total_ms % 60_000) // 1000
+        ms = total_ms % 1000
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
     lines = []

@@ -131,11 +131,25 @@ class LLMService:
             timeout=self.timeout,
         )
 
+    def _chat(self, client: LLMClient, **kwargs) -> str:
+        """调用 LLMClient，把 LLMError 统一包装为 LLMServiceError。
+
+        网络/超时/认证等失败也表现为 LLMServiceError，
+        上层（auto 拆分、停顿顾问）的回退逻辑才能统一捕获。
+        """
+        try:
+            return client.chat_completion(**kwargs)
+        except LLMError as e:
+            raise LLMServiceError(str(e)) from e
+
     # ── 测试连接 ──
 
     def test(self) -> str:
         client = self._make_client()
-        return client.test_connection()
+        try:
+            return client.test_connection()
+        except LLMError as e:
+            raise LLMServiceError(str(e)) from e
 
     # ── 文本拆分 ──
 
@@ -200,7 +214,7 @@ class LLMService:
 
         last_content = ""
         for attempt in range(2):
-            content = client.chat_completion(
+            content = self._chat(client,
                 messages=messages,
                 max_completion_tokens=dynamic_max_tokens,
                 temperature=0.3,
@@ -320,7 +334,7 @@ class LLMService:
 请仅输出前句之后应该停顿的秒数（0.0~2.0），不要输出其他内容。"""
         messages = [{"role": "user", "content": prompt}]
         client = self._make_client()
-        content = client.chat_completion(
+        content = self._chat(client,
             messages=messages,
             max_completion_tokens=32,
             temperature=0.3,
@@ -351,7 +365,7 @@ class LLMService:
         missing = set(range(start_index, start_index + expected))
 
         for attempt in range(3):
-            content = client.chat_completion(
+            content = self._chat(client,
                 messages=messages,
                 max_completion_tokens=dynamic_max_tokens,
                 temperature=0.3,
