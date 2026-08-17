@@ -20,6 +20,7 @@ from index_tts_gui.core.project import Project, PROJECT_FILE
 from index_tts_gui.ui.editor import ManuscriptPanel
 from index_tts_gui.ui.synthesis_panel import SynthesisPanel
 from index_tts_gui.ui.subtitle_view import SubtitlePanel
+from index_tts_gui.ui.subtitle_dub_panel import SubtitleDubPanel
 from index_tts_gui.ui.settings_dialog import SettingsDialog
 from index_tts_gui.ui.log_status_bar import LogStatusBar, QtLogHandler
 
@@ -168,6 +169,8 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "synthesis_panel"):
             self.synthesis_panel.set_client(self._client)
+        if hasattr(self, "dub_panel"):
+            self.dub_panel.set_client(self._client)
 
     def _apply_llm_config(self):
         llm_cfg = self._config.get("llm", {})
@@ -213,6 +216,7 @@ class MainWindow(QMainWindow):
             ("📝 文稿", 0),
             ("🎙 合成", 1),
             ("📄 字幕", 2),
+            ("🎬 配音", 3),
         ]
         for label, idx in nav_items:
             btn = QPushButton(label)
@@ -303,6 +307,9 @@ class MainWindow(QMainWindow):
             self.manuscript_panel.get_text
         )
         self._stack.addWidget(self.subtitle_panel)
+
+        self.dub_panel = SubtitleDubPanel(self._project)
+        self._stack.addWidget(self.dub_panel)
 
         layout.addWidget(self._stack)
 
@@ -410,11 +417,13 @@ class MainWindow(QMainWindow):
         self.manuscript_panel.set_project(self._project)
         self.synthesis_panel.set_project(self._project)
         self.subtitle_panel.set_project(self._project)
+        self.dub_panel.set_project(self._project)
 
         if is_new:
             self.manuscript_panel.reset_for_new_project()
             self.synthesis_panel.reset_for_new_project()
             self.subtitle_panel.reset_for_new_project()
+            self.dub_panel.reset_for_new_project()
 
         self._update_project_label()
         self._save_last_project_dir()
@@ -438,7 +447,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         # 先取消各面板的后台任务，避免退出时 QThread 运行中被销毁而 abort
-        for panel_name in ("manuscript_panel", "synthesis_panel", "subtitle_panel"):
+        for panel_name in ("manuscript_panel", "synthesis_panel", "subtitle_panel", "dub_panel"):
             panel = getattr(self, panel_name, None)
             cancel = getattr(panel, "cancel_workers", None) if panel else None
             if callable(cancel):

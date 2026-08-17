@@ -9,7 +9,7 @@
 
 ## 已确认的关键需求
 
-1. **时长策略**：音频保持自然时长，**不变速**。若某段音频超出其时间槽，后续字幕整体往后顺延（波纹偏移）；相邻两段之间的时间间隔由原字幕文件决定。必须输出偏移后的新字幕文件。
+1. **时长策略**：音频保持自然时长，**不变速**。各段尽量按原字幕时间戳放置；某段超出时间槽时，**仅顺延真正被它顶到的后续块**（影响最小原则）：溢出先由段间空白吸收，空白不足时后一块紧接前一块之后开始，一旦后续某块之前重新有空档，时间轴立即回到原时间戳。原字幕本就重叠的块在顺序音轨中按背靠背拼接。必须输出偏移后的新字幕文件。
 2. **音色**：默认使用项目音色（`project.audio_name`），但配音页面也能单独选择/上传音色（页面级临时音色，不改写项目保存值）。
 3. **输出**：对齐（偏移后）时间轴的完整 WAV + 偏移后的新字幕文件（SRT；输入为 ASS 时同时导出 ASS）。
 
@@ -20,7 +20,7 @@
 | 文件 | 职责 |
 |---|---|
 | `core/io_subtitle.py` | 纯逻辑：SRT/ASS 字幕解析器 |
-| `core/dub_planner.py` | 纯逻辑：波纹偏移时间轴计算 |
+| `core/dub_planner.py` | 纯逻辑：偏移时间轴计算（影响最小放置） |
 | `ui/subtitle_dub_worker.py` | QThread 后台配音 worker |
 | `ui/subtitle_dub_panel.py` | 新页面「🎬 配音」 |
 | `ui/main_window.py`（改动） | 注册新页面、注入 client、关闭时 cancel |
@@ -44,7 +44,7 @@ build_track_pauses(new_entries) -> list[float]
 ```
 
 - `new_start[0] = start[0]`；`new_end[i] = new_start[i] + duration[i]`
-- `new_start[i+1] = max(start[i+1], new_end[i] + original_gap)`，其中 `original_gap = start[i+1] - end[i]`（可为负，即原字幕本就重叠时保持重叠量）
+- `new_start[i+1] = max(start[i+1], new_end[i])`：前一段结束时未到后一段的开始时间 → 后一段保持原时间戳（段间空白吸收溢出）；否则后一段紧接前一段之后开始（只顺延被顶到的块）；后续块之前重新有空档时自动回到原时间戳。原字幕重叠（`start[i+1] < end[i]`）无法在顺序音轨中表达，按背靠背拼接。该放置对每段都是最早可行起点，被移动的块数最少。
 - `build_track_pauses` 把新时间轴转成「每段前的静音时长」，供拼接使用
 
 ## ui/subtitle_dub_worker.py — 配音 worker
@@ -91,4 +91,4 @@ build_track_pauses(new_entries) -> list[float]
 ## 测试（最后统一编写，遵循 AGENTS.md）
 
 - `tests/test_io_subtitle.py`：SRT/ASS 解析（含 override tags、`\N`、多行文本、坏格式报错）
-- `tests/test_dub_planner.py`：无冲突不偏移、超长顺延、负间隔重叠保持、首段保持原始 start
+- `tests/test_dub_planner.py`：无冲突不偏移、溢出被段间空白吸收、超长仅顺延被顶到的块、顺延被短块/空档恢复、原重叠转背靠背、首段保持原始 start
