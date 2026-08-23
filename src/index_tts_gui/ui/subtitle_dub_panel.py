@@ -25,6 +25,7 @@ from index_tts_gui.core.io_subtitle import parse_subtitle_file
 from index_tts_gui.core.project import Project
 from index_tts_gui.core.subtitle import SubtitleEntry, seconds_to_time_str
 from index_tts_gui.core.tts_client import BaseTTSClient
+from index_tts_gui.ui.dub_calibrate_worker import DubCalibrateWorker
 from index_tts_gui.ui.subtitle_dub_worker import SubtitleDubWorker
 from index_tts_gui.ui.voice_upload_worker import VoiceUploadWorker
 
@@ -47,6 +48,7 @@ class SubtitleDubPanel(QWidget):
         self._temp_audio_name: str = ""
         self._worker: SubtitleDubWorker | None = None
         self._upload_worker: VoiceUploadWorker | None = None
+        self._calibrate_worker: DubCalibrateWorker | None = None
         self._was_canceled = False
 
         self._player = QMediaPlayer()
@@ -56,6 +58,7 @@ class SubtitleDubPanel(QWidget):
         self._setup_ui()
         self._refresh_voice_label()
         self._refresh_start_button()
+        self._refresh_calibrate_button()
 
     # ── UI ──
 
@@ -105,8 +108,8 @@ class SubtitleDubPanel(QWidget):
         layout.addWidget(voice_gb)
 
         # ── 预览表格 ──
-        table_gb = QGroupBox("字幕预览（只读）")
-        table_layout = QVBoxLayout(table_gb)
+        self._table_gb = QGroupBox("字幕预览（只读）")
+        table_layout = QVBoxLayout(self._table_gb)
         self._table = QTableWidget(0, 5)
         self._table.setHorizontalHeaderLabels(
             ["序号", "原始开始", "原始结束", "文本", "合成状态"]
@@ -119,7 +122,7 @@ class SubtitleDubPanel(QWidget):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         table_layout.addWidget(self._table)
-        layout.addWidget(table_gb, 1)
+        layout.addWidget(self._table_gb, 1)
 
         # ── 控制区 ──
         self._progress = QProgressBar()
@@ -158,6 +161,14 @@ class SubtitleDubPanel(QWidget):
         """)
         self._btn_stop.clicked.connect(self._stop)
         ctrl.addWidget(self._btn_stop)
+
+        self._btn_calibrate = QPushButton("🔄 校准字幕")
+        self._btn_calibrate.setToolTip(
+            "加载调整间隔后的配音音频，反向校准字幕时间戳（需先完成一次配音）"
+        )
+        self._btn_calibrate.setEnabled(False)
+        self._btn_calibrate.clicked.connect(self._calibrate)
+        ctrl.addWidget(self._btn_calibrate)
 
         self._start_hint = QLabel("")
         self._start_hint.setStyleSheet("color: #d32f2f;")
@@ -225,6 +236,7 @@ class SubtitleDubPanel(QWidget):
         self._refresh_start_button()
 
     def _populate_table(self):
+        self._table_gb.setTitle("字幕预览（只读）")
         self._table.setRowCount(0)
         self._table.setRowCount(len(self._entries))
         for row, e in enumerate(self._entries):
@@ -357,6 +369,92 @@ class SubtitleDubPanel(QWidget):
         self._btn_start.setEnabled(True)
         self._start_hint.setText("")
 
+    # ── 校准 ──
+
+    def _refresh_calibrate_button(self):
+        running = self._calibrate_worker is not None and self._calibrate_worker.isRunning()
+        dubbing = self._worker is not None and self._worker.isRunning()
+        if running:
+            self._btn_calibrate.setEnabled(False)
+            self._btn_calibrate.setText("🔄 校准中…")
+            return
+        self._btn_calibrate.setText("🔄 校准字幕")
+        shifted_srt = os.path.join(
+            self._project.output_dir, "dub", "dub_shifted.srt"
+        )
+        self._btn_calibrate.setEnabled(
+            not dubbing and os.path.exists(shifted_srt)
+        )
+
+    def _calibrate(self):
+        if self._calibrate_worker is not None and self._calibrate_worker.isRunning():
+            self._log_msg("⚠ 已有校准任务在运行")
+            return
+
+        dub_dir = os.path.join(self._project.output_dir, "dub")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择调整间隔后的配音音频", dub_dir,
+            "音频文件 (*.wav *.mp3 *.flac)"
+        )
+        if not path:
+            return
+
+        # 是否导出 ASS 以配音产物为准（工程切换/重启后状态可能丢失）
+        export_ass = os.path.exists(os.path.join(dub_dir, "dub_shifted.ass"))
+        self._calibrate_worker = DubCalibrateWorker(
+            path, dub_dir, export_ass=export_ass,
+        )
+        self._calibrate_worker.log.connect(self._log_msg)
+        self._calibrate_worker.progress.connect(self._on_calibrate_progress)
+        self._calibrate_worker.error.connect(self._on_calibrate_error)
+        self._calibrate_worker.finished.connect(self._on_calibrate_finished)
+        self._calibrate_worker.finished.connect(
+            self._on_calibrate_lifetime_finished
+        )
+        self._log_msg(f"🔄 开始校准: {os.path.basename(path)}")
+        self._calibrate_worker.start()
+        self._refresh_calibrate_button()
+
+    def _on_calibrate_progress(self, current: int, total: int, stage: str):
+        self._progress.setMaximum(total)
+        self._progress.setValue(current)
+        self._status_label.setText(f"校准中 [{current}/{total}]: {stage}")
+
+    def _on_calibrate_finished(self, entries: list):
+        if not entries:
+            self._status_label.setText("校准失败，无输出（详见日志）")
+            return
+
+        # 表格切到校准后时间轴显示
+        if len(entries) == self._table.rowCount():
+            for row, e in enumerate(entries):
+                self._table.item(row, 1).setText(seconds_to_time_str(e.start_sec))
+                self._table.item(row, 2).setText(seconds_to_time_str(e.end_sec))
+            self._table_gb.setTitle("字幕预览（校准后）")
+
+        dub_dir = os.path.join(self._project.output_dir, "dub")
+        outputs = [
+            os.path.join(dub_dir, name)
+            for name in ("dub_calibrated.srt", "dub_calibrated.ass")
+            if os.path.exists(os.path.join(dub_dir, name))
+        ]
+        self._status_label.setText("校准完成 ✓")
+        self._outputs_label.setText("输出文件:\n" + "\n".join(outputs))
+        self._log_msg("━━━━━━━━━━ 校准完成 ━━━━━━━━━━")
+        for p in outputs:
+            self._log_msg(f"📦 {p}")
+
+    def _on_calibrate_error(self, msg: str):
+        self._status_label.setText("校准失败")
+        self._log_msg(f"✗ {msg}")
+
+    def _on_calibrate_lifetime_finished(self):
+        """校准 worker 生命周期结束，安全清理引用。"""
+        if self._calibrate_worker is not None:
+            self._calibrate_worker.deleteLater()
+            self._calibrate_worker = None
+        self._refresh_calibrate_button()
+
     # ── 开始 / 取消 ──
 
     def _start(self):
@@ -382,6 +480,7 @@ class SubtitleDubPanel(QWidget):
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
         self._log.clear()
+        self._refresh_calibrate_button()
 
         dub_dir = os.path.join(self._project.output_dir, "dub")
         export_ass = self._input_ext in (".ass", ".ssa")
@@ -446,6 +545,7 @@ class SubtitleDubPanel(QWidget):
         else:
             self._status_label.setText("配音失败，无输出（详见日志）")
         self._refresh_start_button()
+        self._refresh_calibrate_button()
 
     def _on_worker_lifetime_finished(self):
         """worker 生命周期结束，安全清理引用，不访问其成员。"""
@@ -453,6 +553,7 @@ class SubtitleDubPanel(QWidget):
             self._worker.deleteLater()
             self._worker = None
         self._refresh_start_button()
+        self._refresh_calibrate_button()
 
     # ── 外部协议 ──
 
@@ -473,6 +574,7 @@ class SubtitleDubPanel(QWidget):
         self._player.stop()
         self._player.setSource(QUrl())
         self._table.setRowCount(0)
+        self._table_gb.setTitle("字幕预览（只读）")
         self._file_label.setText("未选择文件")
         self._parse_label.setText("尚未解析字幕（支持 .srt / .ass）")
         self._outputs_label.setText("")
@@ -480,6 +582,7 @@ class SubtitleDubPanel(QWidget):
         self._status_label.setText("等待开始…")
         self._refresh_voice_label()
         self._refresh_start_button()
+        self._refresh_calibrate_button()
         self._log_msg(f"已切换到工程: {project.name}")
 
     def reset_for_new_project(self):
@@ -493,6 +596,7 @@ class SubtitleDubPanel(QWidget):
         self._player.stop()
         self._player.setSource(QUrl())
         self._table.setRowCount(0)
+        self._table_gb.setTitle("字幕预览（只读）")
         self._file_label.setText("未选择文件")
         self._parse_label.setText("尚未解析字幕（支持 .srt / .ass）")
         self._outputs_label.setText("")
@@ -501,6 +605,7 @@ class SubtitleDubPanel(QWidget):
         self._log.clear()
         self._refresh_voice_label()
         self._refresh_start_button()
+        self._refresh_calibrate_button()
 
     def _disconnect_upload_worker(self, worker):
         if worker is None:
@@ -513,7 +618,7 @@ class SubtitleDubPanel(QWidget):
 
     def cancel_workers(self):
         """取消所有后台任务（应用退出时由主窗口调用）。"""
-        for worker in (self._worker, self._upload_worker):
+        for worker in (self._worker, self._upload_worker, self._calibrate_worker):
             if worker is None:
                 continue
             try:
