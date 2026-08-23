@@ -92,3 +92,45 @@ build_track_pauses(new_entries) -> list[float]
 
 - `tests/test_io_subtitle.py`：SRT/ASS 解析（含 override tags、`\N`、多行文本、坏格式报错）
 - `tests/test_dub_planner.py`：无冲突不偏移、溢出被段间空白吸收、超长仅顺延被顶到的块、顺延被短块/空档恢复、原重叠转背靠背、首段保持原始 start
+
+---
+
+# 追加：配音页校准功能（2026-08-23，已获用户批准）
+
+## 目标
+
+配音产物 `dub_full.wav` 被用户在外部调整段间间隔后，能反向校准出新的字幕时间轴——与「字幕」页的「🔄 校准字幕」同款能力。
+
+**硬约束（用户明确要求）：所有改动只新增，不影响任何现有功能。** 不修改 `speech_aligner.py` / `calibrate_worker.py` / `subtitle_view.py` / `merger.py` 等现有文件，只调用其公开接口。
+
+## 新增 `ui/dub_calibrate_worker.py`（仿 `CalibrateWorker`）
+
+输入：修改后的音频路径、`dub_dir`、是否导出 ASS。流程：
+
+1. 解析 `dub/dub_shifted.srt` → 校准基准时间轴（与 `dub_full.wav` 布局一致；以文件为基准，重启 app 后仍可校准）
+2. 收集 `dub/dub_*.wav` 按序号排序，数量与条目不一致则报错
+3. `get_wav_duration` 取各段实际时长
+4. **片头归零**：`lead = 首条 start_sec`，基准时间轴整体平移到 0 起点；段后间隔作为 pauses 传给 `align_sentences` 作插值先验
+5. `align_sentences(修改后音频, dub 分段, 文本, pauses)` → 每段在修改后音频中的绝对位置 + 置信度
+6. `recalibrate_entries(归零基准, 归零 starts, durations, new_starts)` → 校准后条目（绝对时间轴；用户裁掉片头静音也能正确映射）
+7. 写出 `dub/dub_calibrated.srt`（输入为 ASS 时加 `dub_calibrated.ass`），不覆盖 `dub_shifted.*`
+8. `finished` 信号带回校准后条目列表
+
+信号与取消模式照抄现有 worker（`log / progress / finished / error / cancel()`）。
+
+## 改动 `ui/subtitle_dub_panel.py`（仅限本页面）
+
+- 控制区加「🔄 校准字幕」按钮：`dub/dub_shifted.srt` 存在才可用，否则禁用并提示「请先完成配音」
+- 点击 → 文件对话框选修改后的音频 → 启动 worker，按钮变「校准中…」
+- 完成 → 预览表格的开始/结束列更新为校准后时间，表格组标题改为「字幕预览（校准后）」，日志框与输出路径区显示新文件
+- `cancel_workers()` 纳入校准 worker；工程切换时按钮状态随 `dub_shifted.srt` 是否存在重新判定
+
+## 边界处理
+
+- 分段 wav 数量与字幕条目数不一致 → 报错中止
+- 低置信段落 → 沿用现有对齐器的插值回退，日志提示哪些条是插值结果
+- 校准不改动 `dub_full.wav` 与各分段文件，可反复校准
+
+## 测试
+
+- `tests/test_dub_calibrate_worker.py`：基准解析、片头归零映射、数量不一致报错、输出文件写出（对齐部分 mock `align_sentences`）
