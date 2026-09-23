@@ -243,7 +243,8 @@ class SettingsDialog(QDialog):
         )
         self._llm_max_len.setValue(llm.get("max_sentence_length", DEFAULT_MAX_LENGTH))
         self._llm_prompt.setPlainText(
-            llm.get("user_prompt_template", DEFAULT_LLM_PROMPT)
+            # 与运行时语义一致：空字符串视为未自定义，显示当前生效的默认提示词
+            llm.get("user_prompt_template") or DEFAULT_LLM_PROMPT
         )
         self._llm_punctuation_fallback.setChecked(
             llm.get("punctuation_fallback", False)

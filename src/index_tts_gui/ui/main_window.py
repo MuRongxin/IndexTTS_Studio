@@ -64,7 +64,7 @@ class MainWindow(QMainWindow):
                 "api_key": "",
                 "deepseek_key": "",
                 "mimo_key": "",
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "timeout": 60,
                 "max_completion_tokens": 2048,
                 "max_sentence_length": 40,

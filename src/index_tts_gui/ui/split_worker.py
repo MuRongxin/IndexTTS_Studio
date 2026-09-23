@@ -41,6 +41,15 @@ class SplitWorker(QThread):
         """请求取消：在分块进度回调等安全点生效，不发任何结果信号。"""
         self._canceled = True
 
+    @staticmethod
+    def _split_message(service: LLMService) -> str:
+        """把拆分完整性诊断写进界面提示，避免内容被静默漏掉。"""
+        pct = round(service.last_coverage * 100)
+        if not service.last_missing:
+            return f"LLM 拆分完成（内容覆盖 {pct}%）"
+        samples = "、".join(s[:12] for s in service.last_missing[:3])
+        return f"LLM 拆分完成（内容覆盖 {pct}%），⚠ 疑似遗漏: {samples}"
+
     def _on_chunk_progress(self, c: int, t: int, m: str):
         if self._canceled:
             raise _SplitCanceled()
@@ -73,7 +82,7 @@ class SplitWorker(QThread):
                 )
                 if self._canceled:
                     return
-                self.finished.emit(sentences, True, "LLM 拆分完成")
+                self.finished.emit(sentences, True, self._split_message(service))
             except LLMServiceError as e:
                 if mode == "llm":
                     raise

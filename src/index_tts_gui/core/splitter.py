@@ -12,7 +12,12 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from index_tts_gui.core.llm_client import LLMClient, LLMError
-from index_tts_gui.core.llm_service import LLMService
+from index_tts_gui.core.llm_service import (
+    DEFAULT_SPLIT_PROMPT,
+    DEFAULT_SPLIT_SYSTEM_PROMPT,
+    LLM_PRESETS,
+    LLMService,
+)
 
 
 logger = logging.getLogger("index_tts")
@@ -133,35 +138,10 @@ class RuleBasedSplitter(BaseSplitter):
         return best
 
 
-LLM_PRESETS: dict[str, dict[str, Any]] = {
-    "mimo": {
-        "api_url": "https://api.xiaomimimo.com/v1",
-        # MiMo 官方当前可用模型（根据 2026-06 文档）：
-        # - mimo-v2.5：基础版，价格低，适合 flash 场景
-        # - mimo-v2.5-pro：旗舰版，能力最强
-        "models": ["mimo-v2.5", "mimo-v2.5-pro"],
-        "default_model": "mimo-v2.5",
-    },
-    "deepseek": {
-        "api_url": "https://api.deepseek.com",
-        # DeepSeek-V4 系列（2026-06 文档）
-        "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
-        "default_model": "deepseek-v4-flash",
-    },
-}
-
-DEFAULT_LLM_SYSTEM_PROMPT = "你是一位中文 TTS 配音专家。你的任务是把文稿拆成适合语音合成的短句，必须按用户要求的格式直接输出句子。"
-
-DEFAULT_LLM_PROMPT = """请将以下文稿按语义和朗读节奏拆分成适合单次 TTS 合成的句子。
-要求：
-1. 每句控制在 {max_length} 字以内（除非原文本身就是一句完整长句）；
-2. 优先在语义完整、语气停顿处拆分；
-3. 不要改写原文，保持原意；
-4. 只输出句子，每行一句，不要编号、不要解释、不要加任何前缀；
-5. 如果文稿只有一句话，也直接输出这句话。
-
-文稿：
-{text}"""
+# LLM 预设与默认提示词只在 llm_service 维护一份，这里保留旧引用名做兼容别名，
+# 避免两份副本随迭代漂移（设置对话框等仍可 from splitter import DEFAULT_LLM_PROMPT）。
+DEFAULT_LLM_SYSTEM_PROMPT = DEFAULT_SPLIT_SYSTEM_PROMPT
+DEFAULT_LLM_PROMPT = DEFAULT_SPLIT_PROMPT
 
 
 class LLMSplitter(BaseSplitter):
