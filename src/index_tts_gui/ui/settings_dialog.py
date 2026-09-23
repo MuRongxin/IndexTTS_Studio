@@ -24,6 +24,31 @@ from index_tts_gui.core.splitter import (
 from index_tts_gui.ui.log_viewer import LogViewerDialog
 
 
+# 思考强度选项按 LLM 预设适配：
+# deepseek V4 默认开启思考，reasoning_effort 实际档位 low/high/max
+#（medium 被服务端映射为 high，故不提供）；mimo 仅支持思考开/关（thinking.type）
+_REASONING_OPTIONS = {
+    "deepseek": [
+        ("默认（思考·high）", ""),
+        ("极速（low）", "low"),
+        ("标准（high）", "high"),
+        ("最强（max）", "max"),
+    ],
+    "mimo": [
+        ("默认（开启思考）", ""),
+        ("关闭思考", "off"),
+    ],
+}
+_REASONING_OPTIONS_CUSTOM = [
+    ("默认（不传参）", ""),
+    ("低（low）", "low"),
+    ("中（medium）", "medium"),
+    ("高（high）", "high"),
+    ("最强（max）", "max"),
+    ("关闭思考（off）", "off"),
+]
+
+
 class SettingsDialog(QDialog):
     """应用设置对话框。"""
 
@@ -130,6 +155,15 @@ class SettingsDialog(QDialog):
         self._llm_model.setEditable(True)
         self._llm_model.setToolTip("选择 Flash（快/便宜）或 Pro（质量高），也可手动输入模型名")
         llm_layout.addRow("模型:", self._llm_model)
+
+        self._llm_reasoning = QComboBox()
+        self._llm_reasoning.setToolTip(
+            "思考强度：选项随预设适配。\n"
+            "deepseek：reasoning_effort（默认 high，可选 low/high/max）；\n"
+            "mimo：仅支持思考开/关（thinking.type）；\n"
+            "自定义：全量档位，是否生效取决于服务端。"
+        )
+        llm_layout.addRow("思考强度:", self._llm_reasoning)
 
         self._llm_timeout = QSpinBox()
         self._llm_timeout.setRange(5, 300)
@@ -238,6 +272,8 @@ class SettingsDialog(QDialog):
         else:
             self._llm_model.setCurrentText(saved_model)
         self._llm_timeout.setValue(llm.get("timeout", 60))
+        reasoning_idx = self._llm_reasoning.findData(llm.get("reasoning_effort", ""))
+        self._llm_reasoning.setCurrentIndex(max(0, reasoning_idx))
         self._llm_max_completion_tokens.setValue(
             llm.get("max_completion_tokens", llm.get("max_tokens", 2048))
         )
@@ -261,6 +297,7 @@ class SettingsDialog(QDialog):
         self._on_llm_preset_changed(self._llm_preset.currentIndex())
         self._llm_key.clear()
         self._llm_timeout.setValue(60)
+        self._llm_reasoning.setCurrentIndex(0)
         self._llm_max_completion_tokens.setValue(2048)
         self._llm_max_len.setValue(DEFAULT_MAX_LENGTH)
         self._llm_prompt.setPlainText(DEFAULT_LLM_PROMPT)
@@ -327,6 +364,19 @@ class SettingsDialog(QDialog):
         preset = self._llm_preset.itemData(index)
         if preset and preset != "custom" and preset in LLM_PRESETS:
             self._apply_llm_preset(preset)
+        self._reload_reasoning_options(preset or "")
+
+    def _reload_reasoning_options(self, preset: str, keep: str = ""):
+        """按预设重建思考强度选项，尽量保留当前选中值。"""
+        options = _REASONING_OPTIONS.get(preset, _REASONING_OPTIONS_CUSTOM)
+        current = keep or self._llm_reasoning.currentData() or ""
+        self._llm_reasoning.blockSignals(True)
+        self._llm_reasoning.clear()
+        for label, value in options:
+            self._llm_reasoning.addItem(label, value)
+        idx = self._llm_reasoning.findData(current)
+        self._llm_reasoning.setCurrentIndex(idx if idx >= 0 else 0)
+        self._llm_reasoning.blockSignals(False)
 
     def _apply_llm_preset(self, preset: str):
         cfg = LLM_PRESETS[preset]
@@ -380,6 +430,7 @@ class SettingsDialog(QDialog):
             "mimo_key": self._config.get("llm", {}).get("mimo_key", ""),
             "model": self._llm_model.currentText().strip(),
             "timeout": self._llm_timeout.value(),
+            "reasoning_effort": self._llm_reasoning.currentData(),
             "max_completion_tokens": self._llm_max_completion_tokens.value(),
             "max_sentence_length": self._llm_max_len.value(),
             "user_prompt_template": prompt,

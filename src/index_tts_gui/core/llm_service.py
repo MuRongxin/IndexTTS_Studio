@@ -213,6 +213,11 @@ class LLMService:
     def punctuation_fallback(self) -> bool:
         return self._cfg.get("punctuation_fallback", False)
 
+    @property
+    def reasoning_effort(self) -> str:
+        """思考强度："" 表示不传参（服务端默认），否则 low/medium/high。"""
+        return self._cfg.get("reasoning_effort", "")
+
     def is_configured(self) -> bool:
         return bool(self.api_url and self.api_key and self.model)
 
@@ -224,6 +229,7 @@ class LLMService:
             api_key=self.api_key,
             model=self.model,
             timeout=self.timeout,
+            reasoning_effort=self.reasoning_effort,
         )
 
     def _chat(self, client: LLMClient, **kwargs) -> str:

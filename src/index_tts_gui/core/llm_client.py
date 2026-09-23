@@ -34,11 +34,15 @@ class LLMClient:
         api_key: str,
         model: str,
         timeout: int = DEFAULT_TIMEOUT,
+        reasoning_effort: str = "",
     ):
         self.base_url = api_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
+        # 思考强度："" 表示不传参（服务端默认）；low/medium/high/max 走
+        # reasoning_effort；"off" 走 MiMo 风格 thinking.type=disabled
+        self.reasoning_effort = reasoning_effort.strip().lower()
         self._client: OpenAI | None = None
 
     def _get_client(self) -> OpenAI:
@@ -70,14 +74,22 @@ class LLMClient:
         total_chars = sum(len(m.get("content", "")) for m in messages)
         logger.info(
             "调用 LLM: base_url=%s model=%s max_completion_tokens=%s "
-            "messages=%d total_chars=%d temperature=%s",
+            "messages=%d total_chars=%d temperature=%s reasoning_effort=%s",
             self.base_url, self.model, max_completion_tokens,
             len(messages), total_chars, temperature,
+            self.reasoning_effort or "(默认)",
         )
         for i, m in enumerate(messages):
             role = m.get("role", "unknown")
             content_preview = m.get("content", "")[:200].replace("\n", " ")
             logger.debug("LLM message[%d] role=%s: %s", i, role, content_preview)
+
+        if self.reasoning_effort and "reasoning_effort" not in extra:
+            if self.reasoning_effort == "off":
+                # MiMo 风格：思考开关用 thinking.type，不支持 effort 档位
+                extra["extra_body"] = {"thinking": {"type": "disabled"}}
+            else:
+                extra["reasoning_effort"] = self.reasoning_effort
 
         try:
             completion = self._get_client().chat.completions.create(

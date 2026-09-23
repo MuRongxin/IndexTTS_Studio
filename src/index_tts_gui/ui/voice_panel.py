@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QFileDialog, QFrame, QMessageBox,
     QListWidget, QListWidgetItem, QAbstractItemView,
-    QSlider,
+    QSlider, QLineEdit,
 )
 from PySide6.QtCore import Qt, QSize, Signal, QUrl, QEvent
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
@@ -309,6 +309,30 @@ class VoicePanel(QWidget):
         self._btn_upload.clicked.connect(self._upload)
         # 加入布局：之前只创建未入布局，空列表时没有可用的上传入口
         layout.addWidget(self._btn_upload)
+
+        # 无上传能力的 provider（如 index_tts2）：直接填服务器端音色名/路径
+        self._manual_voice_row = QWidget()
+        mv = QHBoxLayout(self._manual_voice_row)
+        mv.setContentsMargins(0, 0, 0, 0)
+        mv.addWidget(QLabel("服务器音色:"))
+        self._manual_voice_input = QLineEdit()
+        self._manual_voice_input.setPlaceholderText(
+            "如 demo_boy.wav 或服务器上的绝对路径"
+        )
+        mv.addWidget(self._manual_voice_input, 1)
+        self._btn_manual_voice = QPushButton("✓ 设为音色")
+        self._btn_manual_voice.setStyleSheet("""
+            QPushButton {
+                background: #4caf50; color: white;
+                padding: 8px 20px; border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: #388e3c; }
+        """)
+        self._btn_manual_voice.clicked.connect(self._set_manual_voice)
+        mv.addWidget(self._btn_manual_voice)
+        self._manual_voice_row.hide()
+        layout.addWidget(self._manual_voice_row)
 
         # 播放器事件
         self._player.playbackStateChanged.connect(self._on_playback_changed)
@@ -710,6 +734,28 @@ class VoicePanel(QWidget):
     def set_client(self, client: BaseTTSClient):
         """外部（如 MainWindow）动态切换 API 客户端。"""
         self._client = client
+        # 无上传能力的 provider（如 index_tts2）：隐藏上传按钮，改用手动填音色名
+        no_upload = client is not None and not getattr(
+            client, "supports_upload", True
+        )
+        self._manual_voice_row.setVisible(no_upload)
+        self._btn_upload.setVisible(not no_upload)
+
+    def _set_manual_voice(self):
+        """无上传能力时，直接把服务器端音色名/路径设为当前音色。"""
+        name = self._manual_voice_input.text().strip()
+        if not name:
+            self._upload_status.setText("⚠ 请输入服务器端音色文件名/路径")
+            self._upload_status.setStyleSheet("color: #d32f2f;")
+            return
+        self._audio_name = name
+        self._audio_path = ""  # 服务器端音色，无本地文件
+        if self._project:
+            self._project.audio_name = name
+            self._project.save()
+        self._upload_status.setText(f"✓ 已设置服务器音色: {name}")
+        self._upload_status.setStyleSheet("color: #4caf50; font-weight: bold;")
+        self.audio_uploaded.emit(name)
 
     def set_project(self, project: Project):
         """切换工程时更新引用（默认音频保留在项目根目录）。"""

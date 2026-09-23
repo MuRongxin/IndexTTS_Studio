@@ -263,6 +263,26 @@ class SubtitleDubPanel(QWidget):
     # ── 音色 ──
 
     def _choose_voice(self):
+        # 无上传能力的 provider（如 index_tts2）：直接填服务器端音色名/路径
+        if self._client is not None and not getattr(
+            self._client, "supports_upload", True
+        ):
+            from PySide6.QtWidgets import QInputDialog
+            name, ok = QInputDialog.getText(
+                self, "服务器音色",
+                "该 API 不支持上传参考音频。\n"
+                "请输入服务器端音色文件名/路径（如 demo_boy.wav）:"
+            )
+            if not ok or not name.strip():
+                return
+            self._temp_audio_name = name.strip()
+            self._temp_audio_path = ""  # 服务器端音色，无本地文件可试听
+            self._btn_preview_voice.setEnabled(False)
+            self._refresh_voice_label()
+            self._log_msg(f"✓ 已设置页面服务器音色: {self._temp_audio_name}（临时）")
+            self._refresh_start_button()
+            return
+
         path, _ = QFileDialog.getOpenFileName(
             self, "选择参考音频", "", "WAV 文件 (*.wav);;所有文件 (*)"
         )
