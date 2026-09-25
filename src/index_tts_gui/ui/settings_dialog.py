@@ -183,7 +183,9 @@ class SettingsDialog(QDialog):
 
         self._llm_prompt = QTextEdit()
         self._llm_prompt.setMaximumHeight(120)
-        self._llm_prompt.setPlaceholderText("提示模板，需包含 {text} 和 {max_length}")
+        self._llm_prompt.setPlaceholderText(
+            "提示模板，必须包含 {text}；{max_length} 可选；留空使用内置默认"
+        )
         llm_layout.addRow("Prompt 模板:", self._llm_prompt)
 
         self._llm_punctuation_fallback = QCheckBox(
@@ -408,15 +410,20 @@ class SettingsDialog(QDialog):
         }
 
         prompt = self._llm_prompt.toPlainText().strip()
-        has_text = re.search(r"(?<!\{)\{text\}(?!\})", prompt) is not None
-        has_max_len = re.search(r"(?<!\{)\{max_length\}(?!\})", prompt) is not None
-        if not prompt or not has_text or not has_max_len:
+        # 只有 {text} 是必需的（文稿要替换到该位置）；{max_length} 可选，模板里
+        # 用到才会被替换；留空表示使用内置默认提示词（与运行时语义一致）。
+        if prompt and "{text}" not in prompt:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(
                 self, "Prompt 模板错误",
-                "Prompt 模板必须包含 {text} 和 {max_length} 占位符"
+                "Prompt 模板必须包含 {text} 占位符（文稿会替换到该位置）。\n\n"
+                "{max_length} 为可选占位符，仅在模板中使用时才会被替换；\n"
+                "模板留空则使用内置默认提示词。"
             )
             return
+        # 与内置默认一致时不留覆盖，保持跟随默认提示词的后续改进
+        if prompt == DEFAULT_LLM_PROMPT.strip():
+            prompt = ""
 
         current_preset = self._llm_preset.currentData()
         current_key = self._llm_key.text().strip()
