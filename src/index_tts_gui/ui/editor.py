@@ -462,7 +462,7 @@ class ManuscriptPanel(QWidget):
             except Exception:
                 pass
             try:
-                self._worker.finished.disconnect()
+                self._worker.result_ready.disconnect()
             except Exception:
                 pass
             self._worker.deleteLater()
@@ -476,8 +476,8 @@ class ManuscriptPanel(QWidget):
         )
         self._worker.setProperty("project_dir", self._project.project_dir)
         self._worker.progress.connect(self._on_split_progress)
-        self._worker.finished.connect(self._on_split_finished)
-        self._worker.finished.connect(self._on_worker_lifetime_finished)
+        self._worker.result_ready.connect(self._on_split_finished)
+        self._worker.result_ready.connect(self._on_worker_lifetime_finished)
         self._worker.start()
 
     def _on_split_progress(self, current: int, total: int, message: str):

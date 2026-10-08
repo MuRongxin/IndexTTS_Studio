@@ -315,6 +315,14 @@ class LLMService:
                 "LLMService.split: 覆盖 %.1f%%，疑似遗漏 %s",
                 self.last_coverage * 100, self.last_missing,
             )
+        # 覆盖率只对"遗漏"敏感（分子分母都是长度，输出偏多会被 min(1.0) 截断）；
+        # 输出显著长于原文通常意味着模型添加/复读了内容，单独告警
+        if src_chars and out_chars > src_chars * 1.05:
+            logger.warning(
+                "LLMService.split: 拆分结果比原文长 %.1f%%（%d → %d 字），"
+                "疑似模型添加了内容，请人工核对",
+                (out_chars / src_chars - 1) * 100, src_chars, out_chars,
+            )
         logger.info("LLMService.split: 共 %d 句", len(sentences))
         return sentences
 

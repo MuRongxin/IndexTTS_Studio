@@ -31,7 +31,8 @@ class DubCalibrateWorker(QThread):
 
     log = Signal(str)
     progress = Signal(int, int, str)
-    finished = Signal(list)   # 校准后的 SubtitleEntry 列表（失败/取消为空列表）
+    # 任务结果信号。不能叫 finished：那会遮蔽 QThread 内置的线程退出信号
+    result_ready = Signal(list)  # 校准后的 SubtitleEntry 列表（失败/取消为空列表）
     error = Signal(str)
 
     def __init__(self, modified_wav_path: str, dub_dir: str, export_ass: bool = False):
@@ -50,7 +51,7 @@ class DubCalibrateWorker(QThread):
         except Exception as e:
             logger.exception("配音校准失败")
             self.error.emit(f"配音校准失败: {e}")
-            self.finished.emit([])
+            self.result_ready.emit([])
 
     def _do_calibrate(self):
         self.log.emit("开始校准配音字幕时间戳…")
@@ -76,7 +77,7 @@ class DubCalibrateWorker(QThread):
         self.log.emit(f"已找到 {len(segment_wavs)} 个配音分段")
 
         if self._canceled:
-            self.finished.emit([])
+            self.result_ready.emit([])
             return
 
         # 3. 片头归零：基准时间轴平移到 0 起点，段后间隔作为对齐先验
@@ -93,7 +94,7 @@ class DubCalibrateWorker(QThread):
         ]
 
         if self._canceled:
-            self.finished.emit([])
+            self.result_ready.emit([])
             return
 
         # 4. 对齐：在修改后音频中定位每个分段
@@ -123,7 +124,7 @@ class DubCalibrateWorker(QThread):
             )
 
         if self._canceled:
-            self.finished.emit([])
+            self.result_ready.emit([])
             return
 
         # 5. 重新映射时间戳（结果为修改后音频中的绝对时间）
@@ -155,4 +156,4 @@ class DubCalibrateWorker(QThread):
 
         self.log.emit(f"校准完成: {len(new_entries)} 条字幕已重新映射")
         logger.info("配音校准完成: %s", outputs)
-        self.finished.emit(new_entries)
+        self.result_ready.emit(new_entries)

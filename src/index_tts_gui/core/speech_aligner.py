@@ -14,7 +14,7 @@
 """
 import logging
 from bisect import bisect_right
-from typing import Callable, Optional
+from typing import Optional
 
 import numpy as np
 import librosa
@@ -165,7 +165,6 @@ def _energy_based_segment(
     wav_path: str,
     num_expected: int,
     sr: int = 16000,
-    expected_durations: Optional[list[float]] = None,
 ) -> list[float]:
     """按能量检测语音段起止，返回各段起始时间。
 
@@ -329,9 +328,7 @@ def align_sentences(
     # 验证不过就判为缺失（该句已不在音频中）。
     hints: dict[int, float] = {}
     if reliable_count == 0 or (n - reliable_count) / max(n, 1) >= 0.1:
-        fallback_starts = _energy_based_segment(
-            modified_wav_path, n, expected_durations=original_durations
-        )
+        fallback_starts = _energy_based_segment(modified_wav_path, n)
         if len(fallback_starts) == n:
             for i in range(n):
                 if not reliable[i]:
@@ -385,65 +382,6 @@ def align_sentences(
     logger.info("对齐完成: %d 句, 成功匹配 %d 句, 缺失 %d 句",
                 n, matched, missing)
     return new_starts, scores
-
-
-def build_time_mapper(
-    old_starts: list[float],
-    old_durations: list[float],
-    new_starts: list[float],
-) -> Callable[[float], float]:
-    """
-    构建时间映射函数: new_t = mapper(old_t)。
-
-    每句的音频内容不变（仍是同一份 WAV），只是被放到了新位置，
-    因此映射是**逐句刚性平移**：new_t = t + delta[i]，
-    delta[i] = new_starts[i] - old_starts[i]。
-
-    不能按"相邻句线性插值"映射：调整过后的音频可能改变了语序，
-    旧时间轴上相邻的几句在新音频里未必相邻（甚至可能先后的顺序调换），
-    插值会把字幕推到完全错误的位置。
-
-    缺失句（new_starts[i] < 0，已被删除或未能匹配）没有可靠平移量，
-    对应字幕条目由 recalibrate_entries 丢弃；此处用相邻可用句的
-    平移量兜底，保证不会算出负时间。
-    """
-    n = len(old_starts)
-    if n == 0:
-        return lambda t: t
-
-    deltas: list[Optional[float]] = [
-        new_starts[i] - old_starts[i] if new_starts[i] >= 0 else None
-        for i in range(n)
-    ]
-
-    # 前向/后向最近的可用平移量，供缺失句兜底
-    prev_shift = [0.0] * n
-    last: Optional[float] = None
-    for i in range(n):
-        if deltas[i] is not None:
-            last = deltas[i]
-        if last is not None:
-            prev_shift[i] = last
-    next_shift = [0.0] * n
-    nxt: Optional[float] = None
-    for i in range(n - 1, -1, -1):
-        if deltas[i] is not None:
-            nxt = deltas[i]
-        if nxt is not None:
-            next_shift[i] = nxt
-
-    def map_time(t: float) -> float:
-        i = bisect_right(old_starts, t) - 1
-        if i < 0:
-            i = 0
-        elif i >= n:
-            i = n - 1
-        d = deltas[i]
-        if d is None:
-            d = prev_shift[i] if prev_shift[i] else next_shift[i]
-        return t + d
-
-    return map_time
 
 
 def sentence_of(

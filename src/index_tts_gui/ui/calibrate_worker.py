@@ -17,7 +17,8 @@ class CalibrateWorker(QThread):
 
     log = Signal(str)
     progress = Signal(int, int, str)
-    finished = Signal(list)
+    # 任务结果信号。不能叫 finished：那会遮蔽 QThread 内置的线程退出信号
+    result_ready = Signal(list)
     error = Signal(str)
 
     def __init__(
@@ -121,4 +122,4 @@ class CalibrateWorker(QThread):
         if dropped:
             msg += f"，{dropped} 条因对应句子已不在音频中被移除"
         self.log.emit(msg)
-        self.finished.emit(new_entries)
+        self.result_ready.emit(new_entries)

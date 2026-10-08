@@ -616,6 +616,31 @@ class VoicePanel(QWidget):
         self._segment_list_widget.addItem(item)
         self._segment_list_widget.scrollToBottom()
 
+    def update_segment(self, index: int, filename: str):
+        """更新（或按序号插入）指定句的片段条目。
+
+        增量合成时列表可能已含该句的旧条目（旧文件名/旧 take），
+        直接 add 会产生重复，因此：已有同序号条目则原位更新文件名，
+        没有则按序号有序插入。index 为 1-based。
+        """
+        target = index - 1  # 0-based
+        list_widget = self._segment_list_widget
+        for row in range(list_widget.count()):
+            item = list_widget.item(row)
+            if item.data(Qt.UserRole) == target:
+                item.setText(f"📄 {filename}")
+                item.setToolTip(f"第 {index} 句: {filename}\n双击预览，选中可重新生成")
+                return
+            if item.data(Qt.UserRole) is not None and item.data(Qt.UserRole) > target:
+                new_item = QListWidgetItem(f"📄 {filename}")
+                new_item.setData(Qt.UserRole, target)
+                new_item.setToolTip(f"第 {index} 句: {filename}\n双击预览，选中可重新生成")
+                list_widget.insertItem(row, new_item)
+                list_widget.scrollToItem(new_item)
+                return
+        # 序号比现有所有条目都大（或列表为空）→ 追加
+        self.add_segment(index, filename)
+
     def _on_segment_selection_changed(self):
         """片段选中变化时，通知外部更新按钮状态。"""
         item = self._segment_list_widget.currentItem()
@@ -694,7 +719,7 @@ class VoicePanel(QWidget):
             except Exception:
                 pass
             try:
-                self._worker.finished.disconnect()
+                self._worker.result_ready.disconnect()
             except Exception:
                 pass
             self._worker.deleteLater()
@@ -709,8 +734,8 @@ class VoicePanel(QWidget):
         )
         self._worker.success.connect(self._on_upload_success)
         self._worker.error.connect(self._on_upload_error)
-        self._worker.finished.connect(self._on_upload_finished)
-        self._worker.finished.connect(self._on_worker_lifetime_finished)
+        self._worker.result_ready.connect(self._on_upload_finished)
+        self._worker.result_ready.connect(self._on_worker_lifetime_finished)
         self._worker.start()
 
     def _on_upload_success(self, audio_name: str):

@@ -140,7 +140,7 @@ def test_calibrate_success_emits_signals(tmp_path, qapp):
     logs, progress, finished, errors = [], [], [], []
     worker.log.connect(logs.append)
     worker.progress.connect(lambda c, t, m: progress.append((c, t, m)))
-    worker.finished.connect(finished.append)
+    worker.result_ready.connect(finished.append)
     worker.error.connect(errors.append)
 
     worker.start()
@@ -181,7 +181,7 @@ def test_calibrate_extended_pauses(tmp_path, qapp):
         current_entries=entries,
     )
     finished, errors = [], []
-    worker.finished.connect(finished.append)
+    worker.result_ready.connect(finished.append)
     worker.error.connect(errors.append)
 
     worker.start()
@@ -219,7 +219,7 @@ def test_calibrate_no_sentence_wav_errors(tmp_path, qapp):
         ],
     )
     finished, errors = [], []
-    worker.finished.connect(finished.append)
+    worker.result_ready.connect(finished.append)
     worker.error.connect(errors.append)
 
     worker.start()
@@ -251,7 +251,7 @@ def test_calibrate_count_mismatch_errors(tmp_path, qapp):
         ],
     )
     finished, errors = [], []
-    worker.finished.connect(finished.append)
+    worker.result_ready.connect(finished.append)
     worker.error.connect(errors.append)
 
     worker.start()
@@ -286,7 +286,7 @@ def test_calibrate_cancel_stops_worker(tmp_path, qapp):
         current_entries=entries,
     )
     finished, errors = [], []
-    worker.finished.connect(finished.append)
+    worker.result_ready.connect(finished.append)
     worker.error.connect(errors.append)
 
     worker.start()
@@ -325,7 +325,7 @@ def test_calibrate_empty_pauses_uses_zero(tmp_path, qapp):
         current_entries=entries,
     )
     finished, errors = [], []
-    worker.finished.connect(finished.append)
+    worker.result_ready.connect(finished.append)
     worker.error.connect(errors.append)
 
     worker.start()
@@ -355,7 +355,7 @@ def test_calibrate_short_pauses_padded_with_zero(tmp_path, qapp):
         current_entries=entries,
     )
     finished, errors = [], []
-    worker.finished.connect(finished.append)
+    worker.result_ready.connect(finished.append)
     worker.error.connect(errors.append)
 
     worker.start()
@@ -390,7 +390,7 @@ def test_calibrate_lifecycle_deleteLater_safe(tmp_path, qapp):
         current_entries=entries,
     )
     finished = []
-    worker.finished.connect(finished.append)
+    worker.result_ready.connect(finished.append)
 
     worker.start()
     _wait_for_worker(worker, qapp)

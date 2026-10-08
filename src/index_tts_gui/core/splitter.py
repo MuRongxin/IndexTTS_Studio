@@ -111,9 +111,11 @@ class RuleBasedSplitter(BaseSplitter):
         return [p.strip() for p in parts if p.strip()]
 
     def _find_punctuation_cut(self, text: str, around: int) -> int:
-        """在 around 附近找标点后的切分位置。"""
+        """在 around 附近找标点后的切分位置（只看窗口内的字符）。"""
         best = -1
-        for offset in range(8):
+        # 从 around-1（窗口内最后一个字符）向前找；不能看 text[around]，
+        # 那是窗口外的字符，切在它后面会产生 max_length+1 长的句子
+        for offset in range(1, 8):
             pos = around - offset
             if 0 <= pos < len(text) and text[pos] in '，、；：':
                 best = pos + 1

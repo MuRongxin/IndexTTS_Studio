@@ -1,7 +1,6 @@
 """合并 worker — 在后台线程执行音频合并与字幕生成"""
 import logging
 import os
-import subprocess
 from PySide6.QtCore import QThread, Signal
 
 from index_tts_gui.core.merger import (
@@ -22,7 +21,8 @@ class MergeWorker(QThread):
 
     log = Signal(str)
     progress = Signal(int, int, str)  # current_step, total_steps, message
-    finished = Signal(list)           # 字幕条目列表
+    # 任务结果信号。不能叫 finished：那会遮蔽 QThread 内置的线程退出信号
+    result_ready = Signal(list)       # 字幕条目列表
     error = Signal(str)               # 错误信息
 
     def __init__(
@@ -38,16 +38,14 @@ class MergeWorker(QThread):
         self._llm_cfg = llm_cfg or {}
         self._provided_pauses = pauses
         self._canceled = False
-        self._process: subprocess.Popen | None = None
         self.pauses: list[float] = []
 
     def cancel(self):
+        # 注意：ffmpeg 由 merger 内部的 subprocess.run 执行，句柄不暴露，
+        # 取消只能在下述检查点生效——合并一旦开始会跑完并写出 full_dub.wav，
+        # 随后的 _check_canceled 会丢弃结果（磁盘文件与字幕可能短暂不一致，
+        # 属已知限制，重新合并即可恢复一致）。
         self._canceled = True
-        if self._process is not None and self._process.poll() is None:
-            try:
-                self._process.terminate()
-            except Exception:
-                pass
 
     def _check_canceled(self):
         if self._canceled:
@@ -103,7 +101,7 @@ class MergeWorker(QThread):
         )
         self.log.emit(f"✓ 已生成字幕: {len(entries)} 条")
 
-        self.finished.emit(entries)
+        self.result_ready.emit(entries)
 
     def _resolve_pauses(self) -> list[float]:
         if self._provided_pauses is not None and len(self._provided_pauses) == len(self._sentences):

@@ -19,7 +19,8 @@ class SplitWorker(QThread):
 
     started = Signal()
     progress = Signal(int, int, str)  # current, total, message
-    finished = Signal(list, bool, str)
+    # 任务结果信号。不能叫 finished：那会遮蔽 QThread 内置的线程退出信号
+    result_ready = Signal(list, bool, str)
     # sentences: list[str], used_llm: bool, message: str
 
     def __init__(
@@ -63,7 +64,7 @@ class SplitWorker(QThread):
                 return
             if mode == "rule":
                 sentences = RuleBasedSplitter(self._max_length).split(self._text)
-                self.finished.emit(sentences, False, "规则拆分完成")
+                self.result_ready.emit(sentences, False, "规则拆分完成")
                 return
 
             service = LLMService(self._llm_cfg)
@@ -72,7 +73,7 @@ class SplitWorker(QThread):
                     raise LLMServiceError("LLM 模式需要有效的 api_url / api_key / model")
                 # auto 模式回退
                 sentences = RuleBasedSplitter(self._max_length).split(self._text)
-                self.finished.emit(sentences, False, "LLM 未配置，已回退规则拆分")
+                self.result_ready.emit(sentences, False, "LLM 未配置，已回退规则拆分")
                 return
 
             try:
@@ -82,13 +83,13 @@ class SplitWorker(QThread):
                 )
                 if self._canceled:
                     return
-                self.finished.emit(sentences, True, self._split_message(service))
+                self.result_ready.emit(sentences, True, self._split_message(service))
             except LLMServiceError as e:
                 if mode == "llm":
                     raise
                 # auto 模式回退
                 sentences = RuleBasedSplitter(self._max_length).split(self._text)
-                self.finished.emit(sentences, False, f"LLM 失败({e})，已回退规则拆分")
+                self.result_ready.emit(sentences, False, f"LLM 失败({e})，已回退规则拆分")
 
         except _SplitCanceled:
             return
@@ -97,11 +98,11 @@ class SplitWorker(QThread):
             if mode in ("llm", "auto"):
                 try:
                     sentences = RuleBasedSplitter(self._max_length).split(self._text)
-                    self.finished.emit(sentences, False, f"LLM 拆分失败({e})，已回退规则拆分")
+                    self.result_ready.emit(sentences, False, f"LLM 拆分失败({e})，已回退规则拆分")
                 except Exception as e2:
-                    self.finished.emit([], False, f"拆分失败: {e}; 规则回退也失败: {e2}")
+                    self.result_ready.emit([], False, f"拆分失败: {e}; 规则回退也失败: {e2}")
             else:
-                self.finished.emit([], False, f"拆分失败: {e}")
+                self.result_ready.emit([], False, f"拆分失败: {e}")
         except Exception as e:
             logger.exception("拆分异常")
-            self.finished.emit([], False, f"拆分失败: {e}")
+            self.result_ready.emit([], False, f"拆分失败: {e}")

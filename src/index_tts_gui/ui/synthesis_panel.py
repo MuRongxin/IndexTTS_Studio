@@ -2,6 +2,8 @@
 import glob
 import logging
 import os
+import time
+from datetime import datetime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QProgressBar, QPlainTextEdit, QLabel, QFileDialog,
@@ -15,7 +17,7 @@ from index_tts_gui.core.tts_client import BaseTTSClient, IndexTTSClient
 from index_tts_gui.core.project import Project
 from index_tts_gui.core.merger import collect_sentence_wavs, sanitize_for_filename, parse_sentence_wav_name
 from index_tts_gui.ui.merge_worker import MergeWorker
-from index_tts_gui.ui.synthesis_worker import SynthesisWorker
+from index_tts_gui.ui.synthesis_worker import RETRY_DELAYS, SynthesisWorker
 from index_tts_gui.ui.voice_panel import VoicePanel
 
 
@@ -63,7 +65,23 @@ class SingleSynthesisWorker(QThread):
                     os.remove(old_path)
                 except Exception:
                     pass
-            audio_bytes = self._client.synthesize(self._sentence, self._audio_name)
+            audio_bytes = None
+            last_error = ""
+            for attempt in range(len(RETRY_DELAYS) + 1):
+                try:
+                    audio_bytes = self._client.synthesize(self._sentence, self._audio_name)
+                    break
+                except Exception as e:
+                    last_error = str(e)
+                    if attempt < len(RETRY_DELAYS):
+                        delay = RETRY_DELAYS[attempt]
+                        self.log.emit(
+                            f"  ⚠ 第 {self._index + 1} 句第 {attempt + 1} 次失败，"
+                            f"{delay:.0f}s 后重试: {e}"
+                        )
+                        time.sleep(delay)
+            if audio_bytes is None:
+                raise RuntimeError(last_error)
             with open(wav_path, "wb") as f:
                 f.write(audio_bytes)
             self.success.emit(self._index, wav_path)
@@ -97,6 +115,7 @@ class SynthesisPanel(QWidget):
         self._output_dir: str = project.output_dir
         self._was_canceled = False
         self._llm_cfg: dict = {}
+        self._failed_indices: list[int] = []
 
         self._voice_panel = VoicePanel(self._project, self._client)
         self._voice_panel.audio_uploaded.connect(self.set_audio_name)
@@ -282,18 +301,19 @@ class SynthesisPanel(QWidget):
         self._btn_merge.setEnabled(has_wavs and has_sentences)
         self._btn_refresh_pauses.setEnabled(has_wavs and has_sentences)
 
-    def _diff_sentences(self) -> tuple[list[int], list[int], list[int]]:
-        """对比当前句子与 wav_map，返回 (未变, 已变, 新增) 的 0-based 索引列表。"""
+    def _diff_sentences(self) -> tuple[list[int], list[int], list[int], list[int]]:
+        """对比当前句子与 wav_map，返回 (未变, 已变, 新增, 上次失败) 的 0-based 索引列表。"""
         unchanged = []
         changed = []
         new_sentences = []
+        failed = []
         wav_map = self._project.wav_map
 
         if not wav_map:
             # 无历史映射，全部算新增
             new_sentences = list(range(len(self._sentences)))
             self._log_msg(f"🔍 WAV 映射为空，{len(new_sentences)} 句需重新合成")
-            return unchanged, changed, new_sentences
+            return unchanged, changed, new_sentences, failed
 
         for i, sent in enumerate(self._sentences):
             match = None
@@ -302,10 +322,16 @@ class SynthesisPanel(QWidget):
                     match = entry
                     break
             if match:
-                # 检查对应 WAV 是否存在
-                wav_path = os.path.join(self._output_dir, match["wav"])
-                if os.path.exists(wav_path):
-                    unchanged.append(i)
+                if match.get("status") == "failed":
+                    # 上次失败的句子必须重做，不能沿用旧 take
+                    failed.append(i)
+                elif match.get("wav"):
+                    # 检查对应 WAV 是否存在
+                    wav_path = os.path.join(self._output_dir, match["wav"])
+                    if os.path.exists(wav_path):
+                        unchanged.append(i)
+                    else:
+                        changed.append(i)
                 else:
                     changed.append(i)
             elif any(e["index"] == i for e in wav_map):
@@ -327,9 +353,13 @@ class SynthesisPanel(QWidget):
             self._log_msg(f"🔄 {len(changed)} 句文本已变，需重新合成: {changed[:10]}{'...' if len(changed)>10 else ''}")
         if new_sentences:
             self._log_msg(f"➕ {len(new_sentences)} 句新增，需合成")
+        if failed:
+            self._log_msg(f"❌ {len(failed)} 句上次失败，本次重试: {failed[:10]}{'...' if len(failed)>10 else ''}")
         if deleted:
             self._log_msg(f"🗑 {len(deleted)} 句已从文稿移除，对应 WAV 可清理")
             for e in deleted:
+                if not e.get("wav"):
+                    continue
                 old_wav = os.path.join(self._output_dir, e["wav"])
                 if os.path.exists(old_wav):
                     try:
@@ -338,7 +368,7 @@ class SynthesisPanel(QWidget):
                         pass
             self._log_msg(f"🗑 已清理 {len(deleted)} 个过期 WAV")
 
-        return unchanged, changed, new_sentences
+        return unchanged, changed, new_sentences, failed
 
     def _start(self):
         if self._client is None:
@@ -355,21 +385,24 @@ class SynthesisPanel(QWidget):
             self._log_msg("⚠ 已有合成任务在运行")
             return
 
-        # 对比句子变化，仅合成已变/新增的句子
-        unchanged, changed, new_sentences = self._diff_sentences()
+        # 对比句子变化，仅合成已变/新增/上次失败的句子
+        unchanged, changed, new_sentences, failed = self._diff_sentences()
 
-        if not changed and not new_sentences and unchanged:
+        if not changed and not new_sentences and not failed and unchanged:
             self._log_msg("✅ 所有句子均未变化，无需重新合成")
             self._refresh_segment_list()
             self._refresh_merge_button()
             return
 
-        indices_to_synth = sorted(set(changed + new_sentences))
+        indices_to_synth = sorted(set(changed + new_sentences + failed))
         if not indices_to_synth:
             self._log_msg("⚠ 没有需要合成的句子")
             return
 
-        self._voice_panel.clear_segments()
+        # 全量列出磁盘上已有的片段（含本次要重做的句子），
+        # 不能清空：增量合成只重做失败/变更句，清空会把
+        # 之前成功合成的句子从列表里抹掉
+        self._refresh_segment_list()
         # 隐藏单句操作按钮，防止批量合成中触发单句重生成并发写同一 WAV
         self._regen_index = -1
         self._btn_preview_single.setVisible(False)
@@ -399,8 +432,8 @@ class SynthesisPanel(QWidget):
         self._worker.sentence_done.connect(self._on_sentence_done)
         self._worker.log.connect(self._log_msg)
         self._worker.error.connect(self._log_msg)
-        self._worker.finished.connect(self._on_finished)
-        self._worker.finished.connect(self._on_worker_lifetime_finished)
+        self._worker.result_ready.connect(self._on_finished)
+        self._worker.result_ready.connect(self._on_worker_lifetime_finished)
         self._worker.start()
 
     def _stop(self):
@@ -430,7 +463,7 @@ class SynthesisPanel(QWidget):
         except Exception:
             pass
         try:
-            worker.finished.disconnect()
+            worker.result_ready.disconnect()
         except Exception:
             pass
 
@@ -440,7 +473,9 @@ class SynthesisPanel(QWidget):
 
     def _on_sentence_done(self, index, path):
         filename = os.path.basename(path) if os.path.exists(path) else f"sentence_{index:02d}.wav"
-        self._voice_panel.add_segment(index, filename)
+        # 列表在合成启动时已全量显示磁盘片段，这里对重做句
+        # 原位更新文件名、对新句有序插入，避免重复条目
+        self._voice_panel.update_segment(index, filename)
 
     def _on_worker_lifetime_finished(self):
         """合成 worker 生命周期结束，安全清理引用。"""
@@ -466,7 +501,9 @@ class SynthesisPanel(QWidget):
             self._refresh_merge_button()
             return
 
-        # 保存 WAV 映射（只保留当前 sentences 范围内的条目）
+        # 保存 WAV 映射（只保留当前 sentences 范围内的条目）。
+        # 失败条目（status=failed）会覆盖该句的旧条目：旧 take 不得
+        # 继续被计为成功，否则下游会静默使用旧波形
         valid_indices = set(range(len(self._sentences)))
         existing_map = {
             entry["index"]: entry
@@ -482,18 +519,48 @@ class SynthesisPanel(QWidget):
 
         self._progress.setValue(self._progress.maximum())
 
-        success_count = len(self._project.wav_map)
-        total_count = len(self._sentences)
-        if success_count == total_count:
+        # 三态统计：成功（有效条目且文件在盘）/ 失败（显式标记）/ 缺失（无条目）
+        ok_count = 0
+        failed_count = 0
+        self._failed_indices = []
+        for i in range(len(self._sentences)):
+            entry = existing_map.get(i)
+            if entry is None:
+                continue
+            if entry.get("status") == "failed":
+                failed_count += 1
+                self._failed_indices.append(i)
+            elif entry.get("wav") and os.path.exists(
+                os.path.join(self._output_dir, entry["wav"])
+            ):
+                ok_count += 1
+            else:
+                failed_count += 1
+                self._failed_indices.append(i)
+        missing_count = len(self._sentences) - ok_count - failed_count
+
+        if failed_count == 0 and missing_count == 0:
             self._status_label.setText("合成完成 ✓")
             self._log_msg("━━━━━━━━━━ 完成 ━━━━━━━━━━")
             self._btn_merge.setEnabled(True)
             self._btn_refresh_pauses.setEnabled(True)
             self.synthesis_done.emit(self._output_dir)
         else:
-            failed = total_count - success_count
-            self._status_label.setText(f"合成完成，但 {failed} 句失败")
-            self._log_msg(f"⚠ 合成完成，但 {failed} 句失败，请检查日志")
+            self._failed_indices.sort()
+            shown = [i + 1 for i in self._failed_indices[:10]]
+            parts = []
+            if failed_count:
+                parts.append(f"{failed_count} 句失败")
+            if missing_count:
+                parts.append(f"{missing_count} 句缺失")
+            self._status_label.setText(
+                f"合成完成，但 {'、'.join(parts)}（成功 {ok_count}/{len(self._sentences)}）"
+            )
+            self._log_msg(
+                f"⚠ 合成完成：成功 {ok_count}，{'、'.join(parts)}。"
+                f"失败句: {shown}{'…' if len(self._failed_indices) > 10 else ''}。"
+                "再次点击「开始合成」会自动重试这些句子"
+            )
             self._btn_merge.setEnabled(False)
             self._btn_refresh_pauses.setEnabled(False)
 
@@ -576,6 +643,8 @@ class SynthesisPanel(QWidget):
             "index": index,
             "text": self._sentences[index],
             "wav": os.path.basename(wav_path),
+            "status": "ok",
+            "batch": datetime.now().isoformat(timespec="seconds"),
         }
         self._project.wav_map = list(existing.values())
         self._project.save()
@@ -584,7 +653,30 @@ class SynthesisPanel(QWidget):
         self._refresh_merge_button()
 
     def _on_single_synth_error(self, index: int, msg: str):
+        # 工程已切换时不写旧结果
+        sender = self.sender()
+        expected = sender.property("project_dir") if sender is not None else ""
+        if expected and expected != self._project.project_dir:
+            return
         self._log_msg(f"✗ 重新合成第 {index+1} 句失败: {msg}")
+        # 显式标记失败，覆盖旧条目：旧 take 不得继续被计为成功
+        if 0 <= index < len(self._sentences):
+            valid_indices = set(range(len(self._sentences)))
+            existing = {
+                e["index"]: e
+                for e in self._project.wav_map
+                if e["index"] in valid_indices
+            }
+            existing[index] = {
+                "index": index,
+                "text": self._sentences[index],
+                "wav": "",
+                "status": "failed",
+                "batch": datetime.now().isoformat(timespec="seconds"),
+                "error": msg,
+            }
+            self._project.wav_map = list(existing.values())
+            self._project.save()
 
     def _on_single_worker_finished(self):
         """单句合成 worker 生命周期结束，安全清理引用。"""
@@ -653,9 +745,9 @@ class SynthesisPanel(QWidget):
         self._merge_worker.setProperty("project_dir", self._project.project_dir)
         self._merge_worker.log.connect(self._log_msg)
         self._merge_worker.progress.connect(self._on_merge_progress)
-        self._merge_worker.finished.connect(self._on_merge_finished)
+        self._merge_worker.result_ready.connect(self._on_merge_finished)
         self._merge_worker.error.connect(self._on_merge_error)
-        self._merge_worker.finished.connect(self._on_merge_worker_finished)
+        self._merge_worker.result_ready.connect(self._on_merge_worker_finished)
         self._merge_worker.error.connect(self._on_merge_worker_finished)
         self._btn_clear_output.setEnabled(False)
         self._merge_worker.start()
@@ -716,6 +808,7 @@ class SynthesisPanel(QWidget):
         self._output_dir = project.output_dir
         self._dir_label.setText(project.output_dir)
         self._audio_name = project.audio_name
+        self._failed_indices = []
         self._voice_panel.set_project(project)
         # 空工程也要清空句子，避免残留上一工程内容被合成进新工程
         self.set_sentences(project.sentences)
@@ -723,20 +816,30 @@ class SynthesisPanel(QWidget):
         self._refresh_merge_button()
 
     def _refresh_segment_list(self):
-        """扫描输出目录，将已有 WAV 文件显示在右侧片段列表。"""
+        """扫描输出目录，将已有 WAV 文件显示在右侧片段列表。
+
+        缺失的句子（失败/未合成）以占位条目显示，避免列表看起来
+        "齐全"而实际有空洞。
+        """
         self._voice_panel.clear_segments()
         # collect_sentence_wavs 按数字序号排序且容忍目录缺失，
         # 字典序排序在 ≥100 句时会把 sentence_100 排到 sentence_99 前
+        present: set[int] = set()
         for wav in collect_sentence_wavs(self._output_dir):
             name = os.path.basename(wav)
             parsed = parse_sentence_wav_name(name)
             # parse_sentence_wav_name 返回 1-based 序号
             idx_1based = parsed[0] if parsed else 0
+            present.add(idx_1based)
             self._voice_panel.add_segment(idx_1based, name)
+        for i in range(len(self._sentences)):
+            if (i + 1) not in present:
+                self._voice_panel.add_segment(i + 1, "⚠ 缺失（未合成或失败）")
 
     def reset_for_new_project(self):
         """新建工程时清空面板状态。"""
         self._sentences = []
+        self._failed_indices = []
         self._progress.setValue(0)
         self._progress.setMaximum(0)
         self._status_label.setText("等待拆分句子")

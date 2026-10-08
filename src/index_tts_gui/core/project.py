@@ -27,6 +27,26 @@ DEFAULT_PROJECTS_DIR = "projects"
 DEFAULT_OUTPUT_SUBDIR = "output_tts"
 
 
+def _as_list(value: list | None, field: str) -> list:
+    """工程 JSON 字段的类型守卫：None/列表正常返回，其他类型置空并告警。
+
+    防止损坏的 project.json 里字段意外为字符串时被 list("abc")
+    静默拆成字符级分句。
+    """
+    if value is None or isinstance(value, list):
+        return list(value) if value else []
+    logger.warning("工程字段 %s 类型异常（%s），已忽略", field, type(value).__name__)
+    return []
+
+
+def _as_dict(value: dict | None, field: str) -> dict:
+    if isinstance(value, dict):
+        return dict(value)
+    if value is not None:
+        logger.warning("工程字段 %s 类型异常（%s），已忽略", field, type(value).__name__)
+    return {}
+
+
 class Project:
     """TTS 配音工程。"""
 
@@ -51,15 +71,15 @@ class Project:
         self.project_dir = project_dir
         self.name = name
         self.source_text = source_text
-        self.sentences = list(sentences) if sentences else []
+        self.sentences = _as_list(sentences, "sentences")
         self.audio_name = audio_name
-        self.pauses = list(pauses) if pauses else []
-        self.pauses_for_sentences: list[str] = list(pauses_for_sentences) if pauses_for_sentences else []
-        self.audio_list: list[dict] = list(audio_list) if audio_list else []
-        self.wav_map: list[dict] = list(wav_map) if wav_map else []
-        self.subtitles: list[dict] = list(subtitles) if subtitles else []
-        self.subtitles_original: list[dict] = list(subtitles_original) if subtitles_original else []
-        self.subtitle_style: dict = dict(subtitle_style) if subtitle_style else {}
+        self.pauses = _as_list(pauses, "pauses")
+        self.pauses_for_sentences: list[str] = _as_list(pauses_for_sentences, "pauses_for_sentences")
+        self.audio_list: list[dict] = _as_list(audio_list, "audio_list")
+        self.wav_map: list[dict] = _as_list(wav_map, "wav_map")
+        self.subtitles: list[dict] = _as_list(subtitles, "subtitles")
+        self.subtitles_original: list[dict] = _as_list(subtitles_original, "subtitles_original")
+        self.subtitle_style: dict = _as_dict(subtitle_style, "subtitle_style")
         self.calibrated_audio_path = calibrated_audio_path
         self.created_at = created_at or datetime.now().isoformat()
         self.updated_at = updated_at or datetime.now().isoformat()

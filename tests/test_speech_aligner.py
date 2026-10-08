@@ -4,8 +4,7 @@
 1. _cross_correlate_match —— 互相关匹配
 2. _energy_based_segment —— 能量分割回退
 3. align_sentences —— 端到端对齐
-4. build_time_mapper —— 时间映射函数
-5. recalibrate_entries —— 字幕重映射
+4. recalibrate_entries —— 字幕重映射
 
 不依赖 PySide6 / GUI；只依赖 numpy / scipy / librosa。
 """
@@ -359,122 +358,6 @@ def test_align_sentences_mismatched_count_raises(tmp_path):
     )
     # 不抛异常（实际行为）— 取决于实现
     assert isinstance(new_starts, list)
-
-
-# ────────────────────────────────────────────────────────────────────
-# build_time_mapper
-# ────────────────────────────────────────────────────────────────────
-
-
-def test_mapper_identity_when_no_change():
-    """当 old_starts == new_starts（无调整），map_time 应恒等。"""
-    from index_tts_gui.core.speech_aligner import build_time_mapper
-
-    old_starts = [0.0, 2.0, 5.0]
-    durations = [1.0, 1.0, 1.0]
-    mapper = build_time_mapper(old_starts, durations, old_starts)
-
-    for t in [0.0, 0.5, 1.5, 2.5, 4.0, 5.5, 6.5]:
-        assert mapper(t) == pytest.approx(t, abs=1e-9)
-
-
-def test_mapper_phrase_shift_preserves_relative():
-    """整段后移 5s：所有时间点 + 5s。"""
-    from index_tts_gui.core.speech_aligner import build_time_mapper
-
-    old_starts = [0.0, 2.0, 5.0]
-    durations = [1.0, 1.0, 1.0]
-    new_starts = [5.0, 7.0, 10.0]  # 整段后移 5s
-    mapper = build_time_mapper(old_starts, durations, new_starts)
-
-    for t in [0.0, 1.0, 2.5, 4.5, 5.5, 6.5]:
-        assert mapper(t) == pytest.approx(t + 5.0, abs=1e-9)
-
-
-def test_mapper_within_phrase_linear():
-    """句内：mapper(old_starts[i] + dt) = new_starts[i] + dt（线性平移）。"""
-    from index_tts_gui.core.speech_aligner import build_time_mapper
-
-    old_starts = [0.0, 5.0]
-    durations = [2.0, 1.0]
-    new_starts = [10.0, 13.0]  # 句1 移到 10s
-    mapper = build_time_mapper(old_starts, durations, new_starts)
-
-    # 句 1 内部 (0, 2)
-    assert mapper(0.0) == 10.0
-    assert mapper(1.0) == 11.0
-    assert mapper(2.0) == 12.0  # 句 1 末尾
-
-
-def test_mapper_gap_proportional():
-    """句间停顿段按比例映射。"""
-    from index_tts_gui.core.speech_aligner import build_time_mapper
-
-    # 句 1 在 0-2s, 2-5s 是 3s 停顿, 句 2 在 5-6s
-    # 调整后: 句 1 在 10-12s, 12-13s 是 1s 停顿, 句 2 在 13-14s
-    old_starts = [0.0, 5.0]
-    durations = [2.0, 1.0]
-    new_starts = [10.0, 13.0]
-    mapper = build_time_mapper(old_starts, durations, new_starts)
-
-    # 句间 [2, 5] → 句间 [12, 13]
-    # t=3.5 (中间点) → 12.5 (中间点)
-    assert mapper(3.5) == pytest.approx(12.5, abs=1e-9)
-    # t=2 (句1 末尾) → 12
-    assert mapper(2.0) == 12.0
-    # t=5 (句2 起点) → 13
-    assert mapper(5.0) == 13.0
-
-
-def test_mapper_after_last_phrase():
-    """超过最后一句的映射：保持 last 段末尾的偏移。"""
-    from index_tts_gui.core.speech_aligner import build_time_mapper
-
-    old_starts = [0.0, 3.0]
-    durations = [1.0, 1.0]
-    new_starts = [0.0, 5.0]  # 句 2 后移 2s
-    mapper = build_time_mapper(old_starts, durations, new_starts)
-
-    # 句 2 末尾在 old=4.0, new=6.0
-    # 之后的点应保持 6.0 - 4.0 = +2 偏移
-    assert mapper(5.0) == 7.0
-    assert mapper(10.0) == 12.0
-
-
-def test_mapper_before_first_phrase():
-    """早于第一句：保持 first 段起点的偏移。"""
-    from index_tts_gui.core.speech_aligner import build_time_mapper
-
-    old_starts = [5.0, 8.0]
-    durations = [1.0, 1.0]
-    new_starts = [10.0, 13.0]  # 句 1 起点后移 5s
-    mapper = build_time_mapper(old_starts, durations, new_starts)
-
-    # 5s 之前：保持 +5 偏移
-    assert mapper(0.0) == 5.0
-    assert mapper(3.0) == 8.0
-
-
-def test_mapper_empty():
-    """空输入：恒等函数。"""
-    from index_tts_gui.core.speech_aligner import build_time_mapper
-
-    mapper = build_time_mapper([], [], [])
-    assert mapper(0.0) == 0.0
-    assert mapper(5.0) == 5.0
-
-
-def test_mapper_zero_gap_no_division_by_zero():
-    """句间 gap = 0 时不能除零。"""
-    from index_tts_gui.core.speech_aligner import build_time_mapper
-
-    old_starts = [0.0, 1.0]  # 句 1 0-1, 句 2 起点 1
-    durations = [1.0, 1.0]
-    new_starts = [0.0, 1.0]  # 也是紧贴
-    mapper = build_time_mapper(old_starts, durations, new_starts)
-
-    # 不会抛异常
-    assert mapper(1.5) == 1.5  # 句 2 中点
 
 
 # ────────────────────────────────────────────────────────────────────

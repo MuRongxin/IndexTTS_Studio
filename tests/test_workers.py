@@ -94,7 +94,7 @@ def test_voice_upload_worker_success(tmp_path, qapp):
     worker.started.connect(lambda: started.append(True))
     worker.success.connect(success.append)
     worker.error.connect(errors.append)
-    worker.finished.connect(lambda: finished.append(True))
+    worker.result_ready.connect(lambda: finished.append(True))
 
     worker.start()
     _wait_for_worker(worker, qapp)
@@ -121,7 +121,7 @@ def test_voice_upload_worker_failure_response(tmp_path, qapp):
     worker.success.connect(success.append)
     worker.error.connect(errors.append)
     finished_count = [0]
-    worker.finished.connect(lambda: finished_count.__setitem__(0, finished_count[0] + 1))
+    worker.result_ready.connect(lambda: finished_count.__setitem__(0, finished_count[0] + 1))
 
     worker.start()
     _wait_for_worker(worker, qapp)
@@ -143,7 +143,7 @@ def test_voice_upload_worker_exception(tmp_path, qapp):
     success, errors, finished_count = [], [], [0]
     worker.success.connect(success.append)
     worker.error.connect(errors.append)
-    worker.finished.connect(lambda: finished_count.__setitem__(0, finished_count[0] + 1))
+    worker.result_ready.connect(lambda: finished_count.__setitem__(0, finished_count[0] + 1))
 
     worker.start()
     _wait_for_worker(worker, qapp)
@@ -188,7 +188,7 @@ def test_synthesis_worker_multi_sentence(tmp_path, qapp):
     worker.sentence_done.connect(lambda idx, path: done.append((idx, path)))
     worker.log.connect(logs.append)
     worker.error.connect(errors.append)
-    worker.finished.connect(finished_map.append)
+    worker.result_ready.connect(finished_map.append)
 
     worker.start()
     _wait_for_worker(worker, qapp)
@@ -220,7 +220,7 @@ def test_synthesis_worker_cancel(tmp_path, qapp):
 
     errors, finished_map = [], []
     worker.error.connect(errors.append)
-    worker.finished.connect(finished_map.append)
+    worker.result_ready.connect(finished_map.append)
 
     worker.start()
     worker.cancel()
@@ -246,7 +246,7 @@ def test_synthesis_worker_partial_failure(tmp_path, qapp):
     done, errors, finished_map = [], [], []
     worker.sentence_done.connect(lambda idx, path: done.append((idx, path)))
     worker.error.connect(errors.append)
-    worker.finished.connect(finished_map.append)
+    worker.result_ready.connect(finished_map.append)
 
     worker.start()
     _wait_for_worker(worker, qapp)
@@ -335,7 +335,7 @@ def test_merge_worker_success(tmp_path, qapp):
     log, progress, finished_entries, errors = [], [], [], []
     worker.log.connect(log.append)
     worker.progress.connect(lambda c, t, m: progress.append((c, t, m)))
-    worker.finished.connect(finished_entries.append)
+    worker.result_ready.connect(finished_entries.append)
     worker.error.connect(errors.append)
 
     worker.start()
@@ -370,7 +370,7 @@ def test_merge_worker_empty_output(tmp_path, qapp):
     )
 
     finished_entries, errors = [], []
-    worker.finished.connect(finished_entries.append)
+    worker.result_ready.connect(finished_entries.append)
     worker.error.connect(errors.append)
 
     worker.start()
@@ -443,7 +443,7 @@ def test_merge_worker_cancel(tmp_path, qapp):
     )
 
     finished_entries, errors = [], []
-    worker.finished.connect(finished_entries.append)
+    worker.result_ready.connect(finished_entries.append)
     worker.error.connect(errors.append)
 
     worker.start()
@@ -467,7 +467,7 @@ def test_split_worker_rule_mode(tmp_path, qapp):
 
     started, finished = [], []
     worker.started.connect(lambda: started.append(True))
-    worker.finished.connect(lambda s, u, m: finished.append((s, u, m)))
+    worker.result_ready.connect(lambda s, u, m: finished.append((s, u, m)))
 
     worker.start()
     _wait_for_worker(worker, qapp)
@@ -490,7 +490,7 @@ def test_split_worker_auto_fallback(tmp_path, qapp):
     )
 
     finished = []
-    worker.finished.connect(lambda s, u, m: finished.append((s, u, m)))
+    worker.result_ready.connect(lambda s, u, m: finished.append((s, u, m)))
 
     worker.start()
     _wait_for_worker(worker, qapp)
@@ -513,7 +513,7 @@ def test_worker_lifecycle_cleanup(tmp_path, qapp):
     worker = VoiceUploadWorker(client, str(wav), "lifecycle")
 
     finished = []
-    worker.finished.connect(lambda: finished.append(True))
+    worker.result_ready.connect(lambda: finished.append(True))
 
     worker.start()
     _wait_for_worker(worker, qapp)

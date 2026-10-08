@@ -828,7 +828,7 @@ class SubtitlePanel(QWidget):
     def _cleanup_calibrate_worker(self):
         if self._calibrate_worker is not None:
             try:
-                self._calibrate_worker.finished.disconnect()
+                self._calibrate_worker.result_ready.disconnect()
             except Exception:
                 pass
             try:
@@ -836,9 +836,19 @@ class SubtitlePanel(QWidget):
             except Exception:
                 pass
             self._calibrate_worker.cancel()
+            # 对齐计算可能持续数分钟，必须等线程退出后再销毁，
+            # 否则延迟删除会销毁运行中的 QThread 导致崩溃
+            # （与 cancel_workers 的处理方式一致）
+            if self._calibrate_worker.isRunning():
+                self._calibrate_worker.wait(2000)
+            if self._calibrate_worker.isRunning():
+                self._calibrate_worker.terminate()
+                self._calibrate_worker.wait(1000)
             self._calibrate_worker.deleteLater()
             self._calibrate_worker = None
         self._btn_calibrate.setText("🔄 校准字幕")
+        # 取消路径不发 finished/error，按钮状态需在此显式刷新
+        self._update_button_states()
 
     def _output_dir(self) -> str:
         if self._project:
@@ -1432,7 +1442,7 @@ class SubtitlePanel(QWidget):
         """启动后台字幕生成线程（仅作为无保存字幕时的自动兜底）。"""
         if self._regen_worker is not None:
             try:
-                self._regen_worker.finished.disconnect()
+                self._regen_worker.result_ready.disconnect()
             except Exception:
                 pass
             try:
@@ -1444,9 +1454,9 @@ class SubtitlePanel(QWidget):
         self._regen_worker = SubtitleRegenerateWorker(sentences, output_dir, pauses)
         # 记录启动时的工程，避免结果覆盖新工程
         self._regen_worker.setProperty("project_dir", self._project.project_dir if self._project else "")
-        self._regen_worker.finished.connect(self._on_regen_finished)
+        self._regen_worker.result_ready.connect(self._on_regen_finished)
         self._regen_worker.error.connect(lambda msg: logger.warning("自动重建字幕失败: %s", msg))
-        self._regen_worker.finished.connect(self._regen_worker.deleteLater)
+        self._regen_worker.result_ready.connect(self._regen_worker.deleteLater)
         self._regen_worker.start()
 
     def _on_regen_finished(self, entries):
@@ -1492,9 +1502,9 @@ class SubtitlePanel(QWidget):
             current_entries=original_entries,
         )
         self._calibrate_worker.log.connect(lambda msg: logger.info(msg))
-        self._calibrate_worker.finished.connect(self._on_calibrate_finished)
+        self._calibrate_worker.result_ready.connect(self._on_calibrate_finished)
         self._calibrate_worker.error.connect(self._on_calibrate_error)
-        self._calibrate_worker.finished.connect(self._calibrate_worker.deleteLater)
+        self._calibrate_worker.result_ready.connect(self._calibrate_worker.deleteLater)
         self._calibrate_worker.error.connect(self._calibrate_worker.deleteLater)
 
         self._btn_calibrate.setEnabled(False)

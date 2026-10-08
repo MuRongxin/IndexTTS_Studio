@@ -2,6 +2,7 @@
 import glob
 import logging
 import os
+import re
 import tempfile
 
 from PySide6.QtCore import QThread, Signal
@@ -16,13 +17,17 @@ from index_tts_gui.core.tts_client import BaseTTSClient
 
 logger = logging.getLogger("index_tts")
 
+# 只匹配分段文件 dub_001.wav，排除拼接产物 dub_full.wav
+_SEGMENT_RE = re.compile(r"dub_(\d+)\.wav$")
+
 
 class SubtitleDubWorker(QThread):
     """后台配音线程：合成每句 → 规划偏移时间轴 → 拼接完整 WAV → 导出偏移字幕。"""
 
     progress = Signal(int, int, str)     # current, total, sentence_text
     sentence_done = Signal(int)          # 1-based 条目序号
-    finished = Signal(list)              # 输出文件路径列表（失败/取消时为空列表）
+    # 任务结果信号。不能叫 finished：那会遮蔽 QThread 内置的线程退出信号
+    result_ready = Signal(list)          # 输出文件路径列表（失败/取消时为空列表）
     error = Signal(str)                  # 错误信息
     log = Signal(str)                    # 日志
 
@@ -54,8 +59,12 @@ class SubtitleDubWorker(QThread):
         self.log.emit(f"开始配音 {total} 条…")
         os.makedirs(self._dub_dir, exist_ok=True)
 
-        # 清理上次运行残留的片段，避免旧文件混入本次拼接
+        # 清理上次运行残留的分段文件，避免旧片段混入本次拼接。
+        # 只匹配 dub_NNN.wav 分段：glob "dub_*.wav" 会把上一次的
+        # dub_full.wav 也删掉，若本次失败/取消，旧成品将不可恢复。
         for stale in glob.glob(os.path.join(self._dub_dir, "dub_*.wav")):
+            if not _SEGMENT_RE.search(os.path.basename(stale)):
+                continue
             try:
                 os.remove(stale)
             except Exception:
@@ -67,7 +76,7 @@ class SubtitleDubWorker(QThread):
                 if self._canceled:
                     self.log.emit("已取消")
                     logger.info("配音已取消，已完成 %d/%d", i - 1, total)
-                    self.finished.emit([])
+                    self.result_ready.emit([])
                     return
 
                 text = entry.text.strip()
@@ -76,7 +85,7 @@ class SubtitleDubWorker(QThread):
                     # 条目错位，直接中止
                     self.log.emit(f"[{i}/{total}] 空文本条目，中止")
                     self.error.emit(f"第 {i} 条字幕文本为空")
-                    self.finished.emit([])
+                    self.result_ready.emit([])
                     return
 
                 self.progress.emit(i, total, text)
@@ -89,7 +98,7 @@ class SubtitleDubWorker(QThread):
                     logger.exception("配音合成第 %d 条失败", i)
                     self.log.emit(f"  ✗ 第 {i} 条合成失败: {e}")
                     self.error.emit(f"第 {i} 条合成失败: {e}")
-                    self.finished.emit([])
+                    self.result_ready.emit([])
                     return
 
                 wav_path = os.path.join(self._dub_dir, f"dub_{i:03d}.wav")
@@ -105,7 +114,7 @@ class SubtitleDubWorker(QThread):
 
             if self._canceled:
                 self.log.emit("已取消")
-                self.finished.emit([])
+                self.result_ready.emit([])
                 return
 
             # 取每段实际时长
@@ -139,13 +148,13 @@ class SubtitleDubWorker(QThread):
 
             logger.info("配音完成: %s", outputs)
             self.log.emit(f"配音完成！共 {len(outputs)} 个输出文件")
-            self.finished.emit(outputs)
+            self.result_ready.emit(outputs)
 
         except Exception as e:
             logger.exception("配音任务失败")
             self.log.emit(f"✗ 配音任务失败: {e}")
             self.error.emit(f"配音任务失败: {e}")
-            self.finished.emit([])
+            self.result_ready.emit([])
 
     def _concat_with_leading_pauses(
         self, wav_paths: list[str], pauses: list[float], output_path: str

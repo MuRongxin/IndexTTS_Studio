@@ -314,7 +314,7 @@ class SubtitleDubPanel(QWidget):
         )
         self._upload_worker.success.connect(self._on_upload_success)
         self._upload_worker.error.connect(self._on_upload_error)
-        self._upload_worker.finished.connect(self._on_upload_finished)
+        self._upload_worker.result_ready.connect(self._on_upload_finished)
         self._upload_worker.start()
         self._refresh_start_button()
 
@@ -427,8 +427,8 @@ class SubtitleDubPanel(QWidget):
         self._calibrate_worker.log.connect(self._log_msg)
         self._calibrate_worker.progress.connect(self._on_calibrate_progress)
         self._calibrate_worker.error.connect(self._on_calibrate_error)
-        self._calibrate_worker.finished.connect(self._on_calibrate_finished)
-        self._calibrate_worker.finished.connect(
+        self._calibrate_worker.result_ready.connect(self._on_calibrate_finished)
+        self._calibrate_worker.result_ready.connect(
             self._on_calibrate_lifetime_finished
         )
         self._log_msg(f"🔄 开始校准: {os.path.basename(path)}")
@@ -513,8 +513,8 @@ class SubtitleDubPanel(QWidget):
         self._worker.sentence_done.connect(self._on_sentence_done)
         self._worker.log.connect(self._log_msg)
         self._worker.error.connect(self._on_error)
-        self._worker.finished.connect(self._on_finished)
-        self._worker.finished.connect(self._on_worker_lifetime_finished)
+        self._worker.result_ready.connect(self._on_finished)
+        self._worker.result_ready.connect(self._on_worker_lifetime_finished)
         self._worker.start()
 
     def _stop(self):

@@ -15,7 +15,8 @@ class VoiceUploadWorker(QThread):
     started = Signal()
     success = Signal(str)   # audio_name
     error = Signal(str)     # error message
-    finished = Signal()
+    # 任务结果信号。不能叫 finished：那会遮蔽 QThread 内置的线程退出信号
+    result_ready = Signal()
 
     def __init__(
         self,
@@ -45,4 +46,4 @@ class VoiceUploadWorker(QThread):
             logger.exception("上传参考音频失败")
             self.error.emit(f"上传失败: {e}")
         finally:
-            self.finished.emit()
+            self.result_ready.emit()

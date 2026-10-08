@@ -34,12 +34,19 @@ def _build_entries_for_sentence(
     chunks = _split_by_pauses(sentence, pauses, max_chars)
 
     total_cc = sum(len(c) for c in chunks)
+    # 每块最短 0.8s 的地板在块数多、句子音频短时会累计超过句长，
+    # 导致块边界越过 end_t、最后一块 start > end（负时长字幕）。
+    # 地板按句长缩放，保证 sum(floor) <= dur。
+    floor = min(0.8, dur / len(chunks)) if chunks else 0.8
     chunk_start = start_t
     for ci, c in enumerate(chunks):
         ratio = len(c) / total_cc if total_cc > 0 else 1 / len(chunks)
-        chunk_end = chunk_start + max(ratio * dur, 0.8)
+        chunk_end = chunk_start + max(ratio * dur, floor)
         if ci == len(chunks) - 1:
             chunk_end = end_t
+        else:
+            # 中间块不越过句尾，避免侵占下一句的时段
+            chunk_end = min(chunk_end, end_t)
 
         entries.append(SubtitleEntry(entry_index, chunk_start, chunk_end, c))
         entry_index += 1

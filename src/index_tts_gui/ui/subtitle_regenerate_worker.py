@@ -16,8 +16,9 @@ logger = logging.getLogger("index_tts")
 class SubtitleRegenerateWorker(QThread):
     """后台线程：收集 WAV → ffprobe 取时长 → 生成字幕条目。"""
 
-    finished = Signal(list)  # entries: list[SubtitleEntry]
-    error = Signal(str)      # 错误信息
+    # 任务结果信号。不能叫 finished：那会遮蔽 QThread 内置的线程退出信号
+    result_ready = Signal(list)  # entries: list[SubtitleEntry]
+    error = Signal(str)          # 错误信息
 
     def __init__(
         self,
@@ -52,7 +53,7 @@ class SubtitleRegenerateWorker(QThread):
                 entries = generate_srt_from_sentences(
                     self._sentences, wavs
                 )
-            self.finished.emit(entries)
+            self.result_ready.emit(entries)
         except Exception as e:
             logger.exception("字幕重新生成失败")
             self.error.emit(str(e))
