@@ -1,7 +1,16 @@
 """
 语音对齐：先在低采样率下对全文做逐句独立粗匹配（互不锚定，避免错误传播），
-再用最长递增子序列做单调性校验剔除离群匹配，最后在高采样率小窗口内精修，
-重新计算字幕时间戳。互相关置信度不足时回退到带期望句数先验的能量分割法。
+低置信句在相邻高置信句区间内带位置先验重匹配，最后在高采样率小窗口内精修，
+重新计算字幕时间戳。
+
+匹配置信度使用精确 NCC（逐窗去均值归一化互相关，[-1, 1]）：
+同一份录音 ≈ 0.9+，不同录音（哪怕同文本重新合成）< 0.5。
+只认正相关峰，避免反相噪声冒充匹配。
+
+支持语序调整和句子删除：不强制单调，每句独立定位到新音频中的真实位置；
+字幕映射是**逐句刚性平移**（每句的音频内容不变，只是被移到新位置），
+不做相邻句插值，否则语序改变后会整体错位。未能匹配的句子标记为 -1，
+对应字幕条目直接丢弃（这句话已不在音频中）。
 """
 import logging
 from bisect import bisect_right
@@ -15,16 +24,19 @@ from index_tts_gui.core.merger import get_wav_duration
 from index_tts_gui.core.subtitle import SubtitleEntry
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("index_tts.speech_aligner")
+
 
 TARGET_SR = 8000          # 精修采样率
 COARSE_SR = 4000          # 粗匹配采样率（全文独立定位）
-CONFIDENCE_THRESHOLD = 0.25
-FALLBACK_RATIO = 0.3
+# NCC 阈值：同一份录音 0.9+，同文本不同一遍合成 / 假峰 < 0.5，取中间留裕量
+CONFIDENCE_THRESHOLD = 0.5
 REFINE_MARGIN = 3.0       # 精修窗口在粗位置前后的余量（秒）
 TOP_K_PEAKS = 5           # 候选峰个数
 PRIOR_CONF_RATIO = 0.7    # 候选峰置信度不低于最佳峰该比例时，优先选离先验位置近的
-MONO_TOLERANCE = 0.05     # 单调性容差（秒）
+
+# 能量分割结果只能作为"待验证提示"，其位置很粗糙，验证窗口要放宽
+HINT_REFINE_MARGIN = 12.0
 
 
 def _load_mono(wav_path: str, target_sr: int = TARGET_SR) -> np.ndarray:
@@ -45,36 +57,52 @@ def _cross_correlate_match(
     在 signal_segment 中匹配 template，返回 (start_time_in_original_audio, confidence)。
     返回的时间相对于完整音频的起始（search_start + 匹配偏移）。
 
+    置信度是精确 NCC（逐窗去均值归一化互相关，[-1, 1]）：
+    同一份录音的窗口 ≈ 0.9+，不同录音（含同文本重新合成）< 0.5。
+    只认正相关峰——负相关（反相）不是"内容相同"的证据。
+
     取 top-k 个候选峰；给定 expected_start 先验时，在置信度接近最佳峰
     （>= PRIOR_CONF_RATIO 倍）的候选中选离先验最近的，避免重复/相似
     内容造成的"自信误配"。
     """
-    t = (template - np.mean(template)) / (np.std(template) + 1e-10)
-    s = (signal_segment - np.mean(signal_segment)) / (np.std(signal_segment) + 1e-10)
-
-    if len(t) > len(s):
+    t = template - np.mean(template)
+    nt = float(np.linalg.norm(t))
+    L = len(t)
+    s = np.asarray(signal_segment, dtype=np.float64)
+    N = len(s)
+    if L > N or L == 0 or nt < 1e-9:
         return -1.0, 0.0
 
-    corr = scipy.signal.correlate(s, t, method="fft")
-    # 只保留完整重叠区域：起点 lag ∈ [0, len(s)-len(t)]
-    valid = np.abs(corr[len(t) - 1 : len(s)])
-    if len(valid) == 0:
+    num = scipy.signal.correlate(s, t.astype(np.float64), method="fft")[L - 1 : N]
+    if len(num) == 0:
         return -1.0, 0.0
 
-    # 候选峰：间距至少半个模板长，避免同一个匹配点附近重复出峰
-    peaks, _ = scipy.signal.find_peaks(valid, distance=max(1, len(t) // 2))
+    # 逐窗局部能量（去均值）。设下限防止纯静音窗的数值伪影：
+    # 真匹配窗口能量与模板相当，低于模板能量 15% 的窗不可能是匹配
+    ones = np.ones(L)
+    sq = scipy.signal.fftconvolve(s * s, ones, mode="valid")
+    mu = scipy.signal.fftconvolve(s, ones, mode="valid") / L
+    loc = np.sqrt(np.maximum(sq - L * mu * mu, (0.15 * nt) ** 2))
+    ncc = np.clip(num / (nt * loc), -1.0, 1.0)
+
+    # 负相关不是有效匹配，只在正相关峰里选；全负时 confidence 归 0。
+    # 首尾各补一个 -inf：匹配落在搜索区端点（如音频开头/结尾的句子）时
+    # 也必须能成为候选峰——find_peaks 本身不考虑数组端点
+    padded = np.concatenate(([-np.inf], ncc, [-np.inf]))
+    peaks, _ = scipy.signal.find_peaks(padded, distance=max(1, L // 2))
+    peaks = peaks - 1
     if len(peaks) == 0:
-        peaks = np.array([int(np.argmax(valid))])
-    top = peaks[np.argsort(valid[peaks])[::-1][:top_k]]
+        peaks = np.array([int(np.argmax(ncc))])
+    top = peaks[np.argsort(ncc[peaks])[::-1][:top_k]]
 
-    best = int(top[np.argmax(valid[top])])
+    best = int(top[np.argmax(ncc[top])])
     chosen = best
     if expected_start is not None:
-        best_conf = valid[best]
-        cands = [p for p in top if valid[p] >= best_conf * PRIOR_CONF_RATIO]
+        best_conf = float(ncc[best])
+        cands = [p for p in top if ncc[p] >= best_conf * PRIOR_CONF_RATIO]
         chosen = int(min(cands, key=lambda p: abs(p / sr + search_start - expected_start)))
 
-    confidence = float(valid[chosen]) / len(t)
+    confidence = max(0.0, float(ncc[chosen]))
     start_time = search_start + chosen / sr
 
     return start_time, confidence
@@ -178,26 +206,6 @@ def _energy_based_segment(
     return [s[0] for s in fitted]
 
 
-def _longest_increasing_subseq(values: list[float]) -> list[int]:
-    """返回 values 的最长递增子序列的下标（允许 MONO_TOLERANCE 内的小回退）。"""
-    n = len(values)
-    if n == 0:
-        return []
-    dp = [1] * n
-    parent = [-1] * n
-    for i in range(n):
-        for j in range(i):
-            if values[j] < values[i] + MONO_TOLERANCE and dp[j] + 1 > dp[i]:
-                dp[i] = dp[j] + 1
-                parent[i] = j
-    best = int(np.argmax(dp))
-    seq = []
-    while best >= 0:
-        seq.append(best)
-        best = parent[best]
-    return sorted(seq)
-
-
 def _interpolate_position(
     i: int,
     old_starts: list[float],
@@ -227,18 +235,23 @@ def align_sentences(
     original_pauses: list[float],
 ) -> tuple[list[float], list[float]]:
     """
-    在修改后的 full_dub.wav 中定位每句原始 WAV 的位置。
+    在调整后的音频中定位每句原始 WAV 的位置。
+
+    支持语序调整和句子删除：不强制单调性，每句独立定位到
+    新音频中的真实位置，缺失句标记为 -1。
 
     流程：
       1. 粗匹配：低采样率下每句独立匹配全文（互不锚定，一句错不影响其他句）
-      2. 单调性校验：最长递增子序列为锚点；离群/低置信句在锚点区间内带
-         位置先验重匹配（重复文本选离预期位置最近的候选峰）
-      3. 精修：高采样率下粗位置 ±REFINE_MARGIN 小窗口内重匹配
-      4. 仍不可靠的句子按原时间轴比例在相邻可靠句之间插值
+      2. 低置信句在相邻高置信句区间内带位置先验重匹配
+         （重复文本选离预期位置最近的候选峰）
+      3. 能量分割只产生"待验证提示"，必须通过互相关验证
+      4. 精修：高采样率下粗位置附近小窗口内重匹配
+      5. 仍不可靠的句子标记为缺失（new_starts[i] = -1.0），
+         其字幕条目会被丢弃——这句话已不在音频中
 
     Returns:
         (new_starts, scores): 每句的新起始时间（秒）与匹配置信度；
-        scores[i] < 0 表示该句为插值结果，未得到有效匹配。
+        scores[i] < 0 表示该句未得到有效匹配（可能已删除或未能定位）。
     """
     n = len(sentence_wavs)
     if n == 0:
@@ -272,24 +285,16 @@ def align_sentences(
         coarse_conf[i] = cf
         logger.debug("句子 %d/%d 粗匹配: start=%.3f conf=%.3f", i + 1, n, st, cf)
 
+    # 只按置信度判可靠性，不比较与原始位置的偏差：
+    # 调整过后的音频本身就可能把句子移到任意位置（重排/增删停顿），
+    # 用旧时间轴做偏差过滤会把正确匹配误判为假匹配。
     reliable = [
         coarse_starts[i] >= 0 and coarse_conf[i] >= CONFIDENCE_THRESHOLD
         for i in range(n)
     ]
 
-    # ── 单调性校验：离群匹配剔除为不可靠 ──
-    idx_reliable = [i for i in range(n) if reliable[i]]
-    anchors = set(idx_reliable)
-    if idx_reliable:
-        lis = _longest_increasing_subseq([coarse_starts[i] for i in idx_reliable])
-        anchors = {idx_reliable[p] for p in lis}
-    for i in idx_reliable:
-        if i not in anchors:
-            logger.warning(
-                "句子 %d 粗匹配位置 (%.2fs) 违反单调性，剔除（conf=%.2f）",
-                i + 1, coarse_starts[i], coarse_conf[i],
-            )
-            reliable[i] = False
+    # 不做单调性（LIS）剔除：用户可能调整了语序，高置信度的非单调
+    # 匹配应予保留。低置信句由下方锚点区间重匹配处理。
 
     # ── 不可靠句：在相邻锚点区间内带位置先验重匹配 ──
     for i in range(n):
@@ -318,53 +323,67 @@ def align_sentences(
 
     reliable_count = sum(reliable)
 
-    # ── 可靠匹配太少：回退能量分割 ──
-    if (n - reliable_count) / max(n, 1) > FALLBACK_RATIO:
-        logger.warning("低置信度句子过多 (%d/%d)，回退到能量分割",
-                       n - reliable_count, n)
+    # ── 能量分割回退：只产生"待验证提示"，绝不直接采用 ──
+    # 调整过后的音频可能删过句子，能量分割凑出的段数/位置都可能是错的；
+    # 因此只把这些位置当作粗提示，必须通过高采样率互相关验证，
+    # 验证不过就判为缺失（该句已不在音频中）。
+    hints: dict[int, float] = {}
+    if reliable_count == 0 or (n - reliable_count) / max(n, 1) >= 0.1:
         fallback_starts = _energy_based_segment(
             modified_wav_path, n, expected_durations=original_durations
         )
         if len(fallback_starts) == n:
-            logger.info("能量分割成功，使用能量分割结果")
-            return fallback_starts, [-1.0] * n
-        logger.warning("能量分割结果不完整 (%d/%d)，使用互相关+插值结果",
-                       len(fallback_starts), n)
+            for i in range(n):
+                if not reliable[i]:
+                    hints[i] = fallback_starts[i]
+            logger.warning(
+                "可靠匹配 %d/%d，能量分割产生 %d 个待验证提示",
+                reliable_count, n, len(hints),
+            )
 
-    # ── 第二遍：高采样率小窗口精修 ──
+    # ── 第二遍：高采样率小窗口精修（含提示验证）──
     full_fine = _load_mono(modified_wav_path, TARGET_SR)
     fine_duration = len(full_fine) / TARGET_SR
     new_starts = [-1.0] * n
     scores = [-1.0] * n
     for i in range(n):
-        if not reliable[i]:
+        if reliable[i]:
+            center, margin = coarse_starts[i], REFINE_MARGIN
+        elif i in hints:
+            center, margin = hints[i], HINT_REFINE_MARGIN
+        else:
             continue
         tpl = _load_mono(sentence_wavs[i], TARGET_SR)
         tpl_dur = len(tpl) / TARGET_SR
-        w_start = max(0.0, coarse_starts[i] - REFINE_MARGIN)
-        w_end = min(fine_duration, coarse_starts[i] + tpl_dur + REFINE_MARGIN)
+        w_start = max(0.0, center - margin)
+        w_end = min(fine_duration, center + tpl_dur + margin)
         seg = full_fine[int(w_start * TARGET_SR): int(w_end * TARGET_SR)]
-        if len(seg) < len(tpl):
-            new_starts[i], scores[i] = coarse_starts[i], coarse_conf[i]
-            continue
-        st, cf = _cross_correlate_match(
-            tpl, seg, TARGET_SR, w_start, expected_start=coarse_starts[i]
-        )
-        if st >= 0 and cf >= CONFIDENCE_THRESHOLD:
-            new_starts[i], scores[i] = st, cf
-        else:
-            # 精修失败则保留粗匹配位置
-            new_starts[i], scores[i] = coarse_starts[i], coarse_conf[i]
-
-    # ── 仍不可靠的句子：按原时间轴比例插值 ──
-    for i in range(n):
+        if len(seg) >= len(tpl):
+            st, cf = _cross_correlate_match(
+                tpl, seg, TARGET_SR, w_start, expected_start=center
+            )
+            if st >= 0 and cf >= CONFIDENCE_THRESHOLD:
+                new_starts[i], scores[i] = st, cf
+                continue
+        # 精修/验证失败：可靠句保留粗匹配位置，提示句判为缺失
         if reliable[i]:
-            continue
-        new_starts[i] = _interpolate_position(i, old_starts, new_starts, reliable)
-        scores[i] = -1.0
+            new_starts[i], scores[i] = coarse_starts[i], coarse_conf[i]
 
-    logger.info("对齐完成: %d 句, 锚点 %d 句, 插值 %d 句",
-                n, sum(reliable), n - sum(reliable))
+    # ── 标记缺失句 ──
+    # 精修后置信度仍低于阈值的句子（含能量提示验证失败的），
+    # 标记为缺失（new_starts=-1）：这句话已不在音频中，
+    # 其字幕条目会由 recalibrate_entries 丢弃，而不是插值到幽灵位置。
+    missing = 0
+    for i in range(n):
+        if scores[i] >= CONFIDENCE_THRESHOLD and new_starts[i] >= 0:
+            continue
+        new_starts[i] = -1.0
+        scores[i] = -1.0
+        missing += 1
+
+    matched = n - missing
+    logger.info("对齐完成: %d 句, 成功匹配 %d 句, 缺失 %d 句",
+                n, matched, missing)
     return new_starts, scores
 
 
@@ -376,37 +395,71 @@ def build_time_mapper(
     """
     构建时间映射函数: new_t = mapper(old_t)。
 
-    句内音频内容未变，直接平移；句间停顿段按 (新间隙/旧间隙) 等比例映射。
+    每句的音频内容不变（仍是同一份 WAV），只是被放到了新位置，
+    因此映射是**逐句刚性平移**：new_t = t + delta[i]，
+    delta[i] = new_starts[i] - old_starts[i]。
+
+    不能按"相邻句线性插值"映射：调整过后的音频可能改变了语序，
+    旧时间轴上相邻的几句在新音频里未必相邻（甚至可能先后的顺序调换），
+    插值会把字幕推到完全错误的位置。
+
+    缺失句（new_starts[i] < 0，已被删除或未能匹配）没有可靠平移量，
+    对应字幕条目由 recalibrate_entries 丢弃；此处用相邻可用句的
+    平移量兜底，保证不会算出负时间。
     """
     n = len(old_starts)
-    old_ends = [old_starts[i] + old_durations[i] for i in range(n)]
-    new_ends = [new_starts[i] + old_durations[i] for i in range(n)]
+    if n == 0:
+        return lambda t: t
+
+    deltas: list[Optional[float]] = [
+        new_starts[i] - old_starts[i] if new_starts[i] >= 0 else None
+        for i in range(n)
+    ]
+
+    # 前向/后向最近的可用平移量，供缺失句兜底
+    prev_shift = [0.0] * n
+    last: Optional[float] = None
+    for i in range(n):
+        if deltas[i] is not None:
+            last = deltas[i]
+        if last is not None:
+            prev_shift[i] = last
+    next_shift = [0.0] * n
+    nxt: Optional[float] = None
+    for i in range(n - 1, -1, -1):
+        if deltas[i] is not None:
+            nxt = deltas[i]
+        if nxt is not None:
+            next_shift[i] = nxt
 
     def map_time(t: float) -> float:
-        if n == 0:
-            return t
-
-        if t <= old_starts[0]:
-            return t + (new_starts[0] - old_starts[0])
-
-        # 最后一个满足 old_starts[i] <= t 的句子
         i = bisect_right(old_starts, t) - 1
-
-        if i >= n - 1 and t > old_ends[-1]:
-            return t + (new_ends[-1] - old_ends[-1])
-
-        if t <= old_ends[i]:
-            return new_starts[i] + (t - old_starts[i])
-
-        # 句间间隙：按新旧间隙比例映射
-        old_gap = old_starts[i + 1] - old_ends[i]
-        new_gap = new_starts[i + 1] - new_ends[i]
-        if old_gap > 1e-6:
-            ratio = (t - old_ends[i]) / old_gap
-            return new_ends[i] + ratio * max(new_gap, 0.0)
-        return new_ends[i] + (t - old_ends[i])
+        if i < 0:
+            i = 0
+        elif i >= n:
+            i = n - 1
+        d = deltas[i]
+        if d is None:
+            d = prev_shift[i] if prev_shift[i] else next_shift[i]
+        return t + d
 
     return map_time
+
+
+def sentence_of(
+    t: float,
+    old_starts: list[float],
+) -> int:
+    """时间戳 t 所属的句子下标（按句子起点二分）。"""
+    n = len(old_starts)
+    if n == 0:
+        return -1
+    i = bisect_right(old_starts, t) - 1
+    if i < 0:
+        return 0
+    if i >= n:
+        return n - 1
+    return i
 
 
 def recalibrate_entries(
@@ -414,24 +467,46 @@ def recalibrate_entries(
     old_sentence_starts: list[float],
     old_sentence_durations: list[float],
     new_sentence_starts: list[float],
-) -> list[SubtitleEntry]:
-    """用对齐结果重新映射字幕条目的时间戳。"""
-    mapper = build_time_mapper(
-        old_sentence_starts, old_sentence_durations, new_sentence_starts
-    )
+) -> tuple[list[SubtitleEntry], int]:
+    """
+    用对齐结果重新映射字幕条目的时间戳。
 
-    new_entries = []
+    每句音频内容未变，译文条目随所在句整体平移。已被删除/未能匹配的
+    句子（new_sentence_starts[i] < 0）说明这句话已不在音频里，
+    其字幕条目保留下来只会错位显示，因此直接丢弃并计数。
+
+    Returns:
+        (新字幕列表, 丢弃的条目数)
+    """
+    n = len(old_sentence_starts)
+    if n == 0:
+        return list(entries), 0
+
+    deltas: list[Optional[float]] = [
+        new_sentence_starts[i] - old_sentence_starts[i]
+        if new_sentence_starts[i] >= 0
+        else None
+        for i in range(n)
+    ]
+
+    new_entries: list[SubtitleEntry] = []
+    dropped = 0
     for e in entries:
-        new_start = mapper(e.start_sec)
-        new_end = mapper(e.end_sec)
+        i = sentence_of((e.start_sec + e.end_sec) / 2.0, old_sentence_starts)
+        d = deltas[i]
+        if d is None:
+            dropped += 1
+            continue
+        new_start = e.start_sec + d
+        new_end = e.end_sec + d
         if new_end <= new_start:
             new_end = new_start + 0.1
         new_entries.append(
             SubtitleEntry(
-                index=e.index,
-                start_sec=round(new_start, 3),
+                index=len(new_entries) + 1,
+                start_sec=round(max(0.0, new_start), 3),
                 end_sec=round(new_end, 3),
                 text=e.text,
             )
         )
-    return new_entries
+    return new_entries, dropped

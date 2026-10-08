@@ -496,8 +496,9 @@ def test_recalibrate_entries_basic():
     durations = [1.0, 1.5, 1.0]
     new_starts = [10.0, 11.0, 12.5]  # 整段后移 10s
 
-    new = recalibrate_entries(entries, old_starts, durations, new_starts)
+    new, dropped = recalibrate_entries(entries, old_starts, durations, new_starts)
     assert len(new) == 3
+    assert dropped == 0
 
     # 句 1 (0.5-1.0) → (10.5-11.0)
     assert new[0].start_sec == 10.5
@@ -522,7 +523,7 @@ def test_recalibrate_entries_preserves_text():
         SubtitleEntry(1, 0.0, 1.0, "你好，世界。"),
         SubtitleEntry(2, 2.0, 3.0, "How are you?"),
     ]
-    new = recalibrate_entries(entries, [0.0, 2.0], [1.0, 1.0], [5.0, 7.0])
+    new, _ = recalibrate_entries(entries, [0.0, 2.0], [1.0, 1.0], [5.0, 7.0])
     assert new[0].text == "你好，世界。"
     assert new[1].text == "How are you?"
 
@@ -534,7 +535,7 @@ def test_recalibrate_entries_end_not_after_start():
 
     # 字幕 end == start (零长度)
     entries = [SubtitleEntry(1, 1.0, 1.0, "x")]
-    new = recalibrate_entries(entries, [0.0], [2.0], [0.0])
+    new, _ = recalibrate_entries(entries, [0.0], [2.0], [0.0])
     assert new[0].end_sec > new[0].start_sec
 
 
@@ -544,30 +545,30 @@ def test_recalibrate_entries_rounds_to_3_decimals():
     from index_tts_gui.core.subtitle import SubtitleEntry
 
     entries = [SubtitleEntry(1, 0.123456789, 0.987654321, "x")]
-    new = recalibrate_entries(entries, [0.0], [1.0], [0.0])
+    new, _ = recalibrate_entries(entries, [0.0], [1.0], [0.0])
     # 检查不是 1.123456789 这种长尾
     assert len(f"{new[0].start_sec:.10f}".rstrip("0").rstrip(".")) <= 6
 
 
-def test_recalibrate_entries_index_preserved():
-    """SubtitleEntry.index 必须保持。"""
+def test_recalibrate_entries_renumbers_index():
+    """丢弃条目后，index 必须重新连续编号（保证 SRT 序号正确）。"""
     from index_tts_gui.core.speech_aligner import recalibrate_entries
     from index_tts_gui.core.subtitle import SubtitleEntry
 
     entries = [
         SubtitleEntry(7, 0.0, 1.0, "a"),
-        SubtitleEntry(13, 1.0, 2.0, "b"),
+        SubtitleEntry(13, 2.0, 3.0, "b"),
     ]
-    new = recalibrate_entries(entries, [0.0, 1.0], [1.0, 1.0], [0.0, 1.0])
-    assert new[0].index == 7
-    assert new[1].index == 13
+    new, _ = recalibrate_entries(entries, [0.0, 2.0], [1.0, 1.0], [0.0, -1.0])
+    assert [e.index for e in new] == [1]
+    assert new[0].text == "a"
 
 
 def test_recalibrate_entries_empty():
     """空输入：返回空列表。"""
     from index_tts_gui.core.speech_aligner import recalibrate_entries
 
-    assert recalibrate_entries([], [], [], []) == []
+    assert recalibrate_entries([], [], [], []) == ([], 0)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -618,8 +619,11 @@ def test_full_pipeline_align_then_recalibrate(tmp_path):
     old_starts = [round(x, 3) for x in old_starts]
 
     # 重映射字幕
-    new_entries = recalibrate_entries(entries, old_starts, durations, new_starts)
+    new_entries, dropped = recalibrate_entries(
+        entries, old_starts, durations, new_starts
+    )
     assert len(new_entries) == 4
+    assert dropped == 0
     # 字幕应保持顺序
     assert new_entries[0].index == 1
     assert new_entries[3].index == 4

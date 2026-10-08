@@ -1473,12 +1473,23 @@ class SubtitlePanel(QWidget):
         if not path:
             return
 
+        # 重复校准时使用原始字幕（首次校准前保存的）作为基准，
+        # 避免 current_entries 在上一轮校准坐标系而 old_starts 在原始坐标系
+        original_entries = self._track.to_entries()
+        if self._project and getattr(self._project, "subtitles_original", None):
+            try:
+                original_entries = [
+                    SubtitleEntry(**d) for d in self._project.subtitles_original
+                ]
+            except Exception:
+                logger.warning("恢复原始字幕失败，使用当前字幕")
+
         self._calibrate_worker = CalibrateWorker(
             modified_wav_path=path,
             sentences=self._project.sentences if self._project else [],
             output_dir=self._output_dir(),
             original_pauses=self._project.pauses if self._project else [],
-            current_entries=self._track.to_entries(),
+            current_entries=original_entries,
         )
         self._calibrate_worker.log.connect(lambda msg: logger.info(msg))
         self._calibrate_worker.finished.connect(self._on_calibrate_finished)

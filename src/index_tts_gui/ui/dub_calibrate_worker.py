@@ -116,7 +116,10 @@ class DubCalibrateWorker(QThread):
             shown = ", ".join(map(str, unreliable[:10]))
             more = "…" if len(unreliable) > 10 else ""
             self.log.emit(
-                f"⚠ {len(unreliable)} 条未得到有效匹配，已按邻近条插值: {shown}{more}"
+                f"⚠ {len(unreliable)} 条未得到有效匹配"
+                "（可能已删除、重排，或该句后来重新合成过——"
+                "两遍 TTS 合成波形不同，无法匹配），"
+                f"对应字幕将被移除: {shown}{more}"
             )
 
         if self._canceled:
@@ -125,12 +128,16 @@ class DubCalibrateWorker(QThread):
 
         # 5. 重新映射时间戳（结果为修改后音频中的绝对时间）
         self.progress.emit(4, 4, "重新映射字幕时间戳")
-        new_entries = recalibrate_entries(
+        new_entries, dropped = recalibrate_entries(
             zeroed,
             [e.start_sec for e in zeroed],
             durations,
             new_starts,
         )
+        if dropped:
+            self.log.emit(
+                f"  ⚠ {dropped} 条字幕因对应片段已不在音频中被移除"
+            )
 
         # 6. 写出校准结果，不覆盖 dub_shifted.*
         outputs = []

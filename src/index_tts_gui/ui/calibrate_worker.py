@@ -77,12 +77,23 @@ class CalibrateWorker(QThread):
             self._sentences,
             pauses,
         )
+        # 全部未定位（new_starts 全为 -1）→ 音频不含任何分句，直接报错
+        missing = [i + 1 for i, ns in enumerate(new_starts) if ns < 0]
+        if missing and len(missing) == len(self._sentences):
+            raise RuntimeError(
+                "未能在该音频中匹配到任何分句音频。\n"
+                "请确认加载的是【调整间隔后的配音音频】"
+                "（full_dub.wav 或其编辑版本），而非视频原声或其他人声文件。"
+            )
         unreliable = [i + 1 for i, s in enumerate(scores) if s < 0]
         if unreliable:
             shown = ", ".join(map(str, unreliable[:10]))
             more = "…" if len(unreliable) > 10 else ""
             self.log.emit(
-                f"{len(unreliable)} 句未得到有效匹配，已按邻近句插值: {shown}{more}"
+                f"{len(unreliable)} 句未能定位"
+                "（可能已被删除，或该句后来重新合成过——"
+                "两遍 TTS 合成波形不同，无法用当前分句音频匹配），"
+                f"对应字幕将被移除: {shown}{more}"
             )
 
         if self._canceled:
@@ -99,12 +110,15 @@ class CalibrateWorker(QThread):
             if i < len(pauses):
                 old_cumulative += pauses[i]
 
-        new_entries = recalibrate_entries(
+        new_entries, dropped = recalibrate_entries(
             self._current_entries,
             old_starts,
             original_durations,
             new_starts,
         )
 
-        self.log.emit(f"校准完成: {len(new_entries)} 条字幕已重新映射")
+        msg = f"校准完成: {len(new_entries)} 条字幕已重新映射"
+        if dropped:
+            msg += f"，{dropped} 条因对应句子已不在音频中被移除"
+        self.log.emit(msg)
         self.finished.emit(new_entries)
