@@ -261,6 +261,7 @@ class LLMService:
         text: str,
         max_length: int | None = None,
         on_progress: callable | None = None,
+        on_chunk_result: callable | None = None,
     ) -> list[str]:
         """用 LLM 将文稿拆分为句子列表。长文稿自动分块处理。
 
@@ -268,6 +269,8 @@ class LLMService:
             text: 原文
             max_length: 单句最大字数
             on_progress: 进度回调 (current: int, total: int, message: str)
+            on_chunk_result: 每块拆分完成回调 (sentences: list[str])，
+                             用于增量显示，长文稿每块完成后都会触发
         """
         stripped = text.strip()
         if not stripped:
@@ -292,6 +295,8 @@ class LLMService:
                 on_progress(1, 1, "正在拆分…")
             sentences = self._split_chunk(stripped, max_len)
             _account(stripped, sentences)
+            if on_chunk_result:
+                on_chunk_result(sentences)
         else:
             # 长文稿分块
             chunks = self._chunk_text(stripped)
@@ -307,6 +312,8 @@ class LLMService:
                 chunk_sentences = self._split_chunk(chunk, max_len)
                 _account(chunk, chunk_sentences)
                 sentences.extend(chunk_sentences)
+                if on_chunk_result:
+                    on_chunk_result(chunk_sentences)
 
         self.last_coverage = min(1.0, out_chars / src_chars) if src_chars else 1.0
         self.last_missing = missing[:5]

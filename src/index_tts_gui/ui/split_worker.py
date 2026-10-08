@@ -19,6 +19,7 @@ class SplitWorker(QThread):
 
     started = Signal()
     progress = Signal(int, int, str)  # current, total, message
+    chunk_ready = Signal(list)         # 单块拆分完成，sentences: list[str]（用于增量显示）
     # 任务结果信号。不能叫 finished：那会遮蔽 QThread 内置的线程退出信号
     result_ready = Signal(list, bool, str)
     # sentences: list[str], used_llm: bool, message: str
@@ -56,6 +57,12 @@ class SplitWorker(QThread):
             raise _SplitCanceled()
         self.progress.emit(c, t, m)
 
+    def _on_chunk_result(self, sentences: list[str]):
+        """单块拆分完成：检查取消后发射 chunk_ready 供 UI 增量显示。"""
+        if self._canceled:
+            raise _SplitCanceled()
+        self.chunk_ready.emit(sentences)
+
     def run(self):
         self.started.emit()
         mode = self._mode.lower().strip()
@@ -80,6 +87,7 @@ class SplitWorker(QThread):
                 sentences = service.split_text(
                     self._text, self._max_length,
                     on_progress=self._on_chunk_progress,
+                    on_chunk_result=self._on_chunk_result,
                 )
                 if self._canceled:
                     return

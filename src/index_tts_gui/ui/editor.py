@@ -94,6 +94,7 @@ class ManuscriptPanel(QWidget):
         self._llm_cfg: dict = {}
         self._worker: SplitWorker | None = None
         self._editing_row: int = -1
+        self._split_canceled: bool = False
         self._setup_ui()
         self._load_from_project()
 
@@ -165,6 +166,21 @@ class ManuscriptPanel(QWidget):
         """)
         self._btn_split.clicked.connect(self._do_split)
         tb_layout.addWidget(self._btn_split)
+
+        self._btn_stop_split = QPushButton("⏹ 停止")
+        self._btn_stop_split.setToolTip("停止正在进行的拆分")
+        self._btn_stop_split.setEnabled(False)
+        self._btn_stop_split.setStyleSheet("""
+            QPushButton {
+                background: #d32f2f; color: white;
+                padding: 6px 18px; border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: #b71c1c; }
+            QPushButton:disabled { background: #ccc; }
+        """)
+        self._btn_stop_split.clicked.connect(self._stop_split)
+        tb_layout.addWidget(self._btn_stop_split)
 
         layout.addWidget(toolbar)
 
@@ -316,6 +332,11 @@ class ManuscriptPanel(QWidget):
 
     def reset_for_new_project(self):
         """新建工程时清空面板状态。"""
+        self._split_canceled = False
+        self._btn_split.setEnabled(True)
+        self._btn_stop_split.setEnabled(False)
+        self._mode_combo.setEnabled(True)
+        self._max_len_spin.setEnabled(True)
         self._editor.blockSignals(True)
         self._table.blockSignals(True)
         try:
@@ -453,8 +474,14 @@ class ManuscriptPanel(QWidget):
                 )
                 return
 
+        self._split_canceled = False
         self._btn_split.setEnabled(False)
+        self._btn_stop_split.setEnabled(True)
+        self._mode_combo.setEnabled(False)
+        self._max_len_spin.setEnabled(False)
         self._status_label.setText("正在拆分…")
+        # 清空表格，等待增量结果逐块追加
+        self._load_table([])
 
         if self._worker is not None:
             try:
@@ -462,7 +489,15 @@ class ManuscriptPanel(QWidget):
             except Exception:
                 pass
             try:
+                self._worker.chunk_ready.disconnect()
+            except Exception:
+                pass
+            try:
                 self._worker.result_ready.disconnect()
+            except Exception:
+                pass
+            try:
+                self._worker.finished.disconnect()
             except Exception:
                 pass
             self._worker.deleteLater()
@@ -476,36 +511,93 @@ class ManuscriptPanel(QWidget):
         )
         self._worker.setProperty("project_dir", self._project.project_dir)
         self._worker.progress.connect(self._on_split_progress)
+        self._worker.chunk_ready.connect(self._on_chunk_ready)
         self._worker.result_ready.connect(self._on_split_finished)
-        self._worker.result_ready.connect(self._on_worker_lifetime_finished)
+        # 生命周期清理挂在 QThread 内置 finished 上：无论正常完成还是
+        # 用户取消（result_ready 不发射），线程退出时都会触发，保证按钮状态恢复
+        self._worker.finished.connect(self._on_worker_lifetime_finished)
         self._worker.start()
+
+    def _stop_split(self):
+        """用户点击「停止」：请求取消拆分。"""
+        if self._worker is None or not self._worker.isRunning():
+            return
+        self._split_canceled = True
+        self._worker.cancel()
+        self._btn_stop_split.setEnabled(False)
+        self._status_label.setText("正在停止…")
 
     def _on_split_progress(self, current: int, total: int, message: str):
         self._status_label.setText(f"{message} ({current}/{total})")
 
+    def _on_chunk_ready(self, sentences: list[str]):
+        """单块拆分完成：把该块的句子追加到表格末尾（增量显示）。"""
+        if not sentences:
+            return
+        self._table.blockSignals(True)
+        try:
+            base = self._table.rowCount()
+            self._table.setRowCount(base + len(sentences))
+            for i, s in enumerate(sentences):
+                row = base + i
+                idx_item = QTableWidgetItem(str(row + 1))
+                idx_item.setFlags(idx_item.flags() & ~Qt.ItemIsEditable)
+                idx_item.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+                self._table.setItem(row, 0, idx_item)
+
+                text_item = QTableWidgetItem(s)
+                self._table.setItem(row, 1, text_item)
+            self._sentences.extend(sentences)
+        finally:
+            self._table.blockSignals(False)
+        self._update_stats()
+        # 滚动到最新行，让用户看到"拆完一点显示一点"
+        self._table.scrollToBottom()
+
     def _on_split_finished(self, sentences: list, used_llm: bool, msg: str):
         self._btn_split.setEnabled(True)
+        self._btn_stop_split.setEnabled(False)
+        self._mode_combo.setEnabled(True)
+        self._max_len_spin.setEnabled(True)
         # 工程已切换时丢弃旧文稿的拆分结果
         sender = self.sender()
         expected = sender.property("project_dir") if sender is not None else ""
         if expected and expected != self._project.project_dir:
             logger.warning("工程已切换，丢弃旧拆分结果")
             return
+        if self._split_canceled:
+            # 取消后不应用任何结果（表格保留已增量显示的部分）
+            return
         if not sentences:
             # 拆分失败：保留已有句子，不用空结果覆盖工程数据
             self._status_label.setText(msg)
             QMessageBox.warning(self, "拆分失败", msg)
             return
-        self._load_table(sentences)
+        # 增量显示已逐块把句子追加进表格；最终用权威结果做一次同步
+        # （数量一致则不重载，避免闪烁；不一致时全量刷新保证正确）
+        if len(self._sentences) != len(sentences):
+            self._load_table(sentences)
+        else:
+            self._sentences = list(sentences)
         self._status_label.setText(msg)
         self._save_sentences_to_project()
         self.sentences_ready.emit(self._sentences)
 
     def _on_worker_lifetime_finished(self):
-        """SplitWorker 生命周期结束，安全清理引用。"""
+        """SplitWorker 生命周期结束，安全清理引用并恢复按钮状态。
+
+        挂在 QThread 内置 finished 上：正常完成与用户取消都会触发。
+        """
         if self._worker is not None:
             self._worker.deleteLater()
             self._worker = None
+        self._btn_split.setEnabled(True)
+        self._btn_stop_split.setEnabled(False)
+        self._mode_combo.setEnabled(True)
+        self._max_len_spin.setEnabled(True)
+        if self._split_canceled:
+            self._status_label.setText("已停止")
+            self._split_canceled = False
 
     def cancel_workers(self):
         """取消运行中的拆分任务（应用退出时由主窗口调用）。"""
