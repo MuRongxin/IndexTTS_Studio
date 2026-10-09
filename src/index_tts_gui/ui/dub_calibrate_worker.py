@@ -16,6 +16,7 @@ from index_tts_gui.core.speech_aligner import (
     report_lines,
 )
 from index_tts_gui.core.subtitler import pause_offsets
+from index_tts_gui.core.fingerprint import load as load_fingerprints
 from index_tts_gui.core.subtitle import SubtitleEntry
 from index_tts_gui.core.subtitler import entries_to_srt
 
@@ -124,8 +125,14 @@ class DubCalibrateWorker(QThread):
         slice_offsets = [
             pause_offsets(p, get_wav_duration(p)) for p in segment_wavs
         ]
+        # 声学指纹（配音时落盘）：某段被重新配音时靠它兜底定位
+        fingerprints = load_fingerprints(self._dub_dir)
+        if fingerprints:
+            self.log.emit(f"已加载声学指纹 {len(fingerprints)} 条")
+
         result = align_sentences_detailed(
-            self._modified_wav_path, segment_wavs, texts, pauses, slice_offsets,
+            self._modified_wav_path, segment_wavs, texts, pauses,
+            slice_offsets, fingerprints,
         )
         new_starts, scores = result.starts, result.scores
         # 失败判据与CalibrateWorker 统一走 is_matched，不再各自判断

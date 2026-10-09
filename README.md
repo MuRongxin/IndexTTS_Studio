@@ -8,7 +8,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-205%20passed-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-214%20passed-brightgreen?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square)
 
 </div>
@@ -144,6 +144,7 @@ index-tts-studio               # 📦 安装后的 console script
 | 📈 **高鲁棒性** | 对人声处理（混响/EQ/压缩）比简单 abs 包络更稳定 |
 | 🔀 **支持换语序** | 逐句独立定位，语序调整后仍能对上位置 |
 | 📐 **句内编辑可用** | 句内插入间隔会拉伸字幕；删掉句首/句尾会被检出并提示 |
+| 🔊 **跨重新合成** | 声学指纹回退，重合成过的句子仍能定位 |
 
 > ⚠️ **支持边界**：句内切片依赖原 TTS 波形逐样本存在。因此**重新合成过的
 > 句子无法定位**（两遍TTS 波形不同），会被移除；同一句内**调换两半顺序**
@@ -172,6 +173,7 @@ src/index_tts_gui/
 │   ├── merger.py                # 🔗 ffmpeg 音频合并 + WAV 文件名解析
 │   ├── subtitler.py             # 📝 字幕生成 + SRT 输出
 │   ├── subtitle.py              # 📋 字幕数据模型（Entry/Track/Item/Style）
+│   ├── fingerprint.py            # 🔊 声学指纹（MFCC），跨重新合成定位
 │   ├── paths.py                # 📍 数据根目录解析（配置/日志/工程落点）
 │   ├── pause_advisor.py         # 💭 LLM 停顿顾问（委托给 LLMService）
 │   ├── pause_rules.py           # 📏 标点停顿规则
@@ -214,7 +216,7 @@ pytest -v
 无头环境（CI / 服务器）无需额外变量：`tests/conftest.py` 会在 import PySide6
 之前设好 `QT_QPA_PLATFORM=offscreen` 并把 `src` 注入 `sys.path`。
 
-**205 个测试**覆盖：
+**214 个测试**覆盖：
 
 | 类别 | 数量 | 文件 |
 |---|---:|---|
@@ -224,6 +226,7 @@ pytest -v
 | 🎯 校准算法 | 31 | `test_speech_aligner.py` |
 | 🔄 校准 Worker | 10 | `test_calibrate_worker.py` |
 | 📄 字幕 | 65 | `test_subtitle.py` 13 · `test_subtitler.py` 16 · `test_subtitle_panel.py` 12 · `test_io_subtitle.py` 13 · `test_dub_planner.py` 11 |
+| 🔊 声学指纹 | 9 | `test_fingerprint.py` |
 | 💾 工程 | 15 | `test_project.py` 6 · `test_project_extra.py` 9 |
 | 🎨 ASS 导出 | 2 | `test_io_ass.py` |
 | 🎚️ 变速 | 7 | `test_audio_speed.py` |

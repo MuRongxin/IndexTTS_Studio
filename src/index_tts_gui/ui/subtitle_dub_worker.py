@@ -12,6 +12,10 @@ from index_tts_gui.core.merger import get_wav_duration, merge_wavs_with_custom_p
 from index_tts_gui.core.subtitle import SubtitleEntry
 from index_tts_gui.core.subtitler import entries_to_srt
 from index_tts_gui.core.tts_client import BaseTTSClient
+from index_tts_gui.core.fingerprint import (
+    compute_file as compute_fingerprint,
+    save as save_fingerprints,
+)
 
 
 logger = logging.getLogger("index_tts")
@@ -180,6 +184,19 @@ class SubtitleDubWorker(QThread):
                 entries_to_ass(new_entries, ass_path)
                 outputs.append(ass_path)
                 self.log.emit(f"  ✓ {ass_path}")
+
+            # 声学指纹：描述刚被拼进 dub_full.wav 的分段，之后某段被
+            # 重新配音时仍能靠它定位
+            try:
+                fps = {i: f for i, f in
+                       ((n, compute_fingerprint(p))
+                        for n, p in enumerate(wav_paths, 1))
+                       if f}
+                if fps:
+                    save_fingerprints(self._dub_dir, fps)
+                    self.log.emit(f"✓ 已保存声学指纹: {len(fps)} 条")
+            except Exception as e:
+                logger.warning("保存声学指纹失败: %s", e)
 
             logger.info("配音完成: %s", outputs)
             self.log.emit(f"配音完成！共 {len(outputs)} 个输出文件")

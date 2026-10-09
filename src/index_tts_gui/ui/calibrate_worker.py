@@ -14,6 +14,7 @@ from index_tts_gui.core.speech_aligner import (
 )
 from index_tts_gui.core.subtitle import SubtitleEntry
 from index_tts_gui.core.subtitler import pause_offsets
+from index_tts_gui.core.fingerprint import load as load_fingerprints
 
 
 logger = logging.getLogger("index_tts")
@@ -89,12 +90,19 @@ class CalibrateWorker(QThread):
         slice_offsets = [
             pause_offsets(p, get_wav_duration(p)) for p in sentence_wavs
         ]
+        # 声学指纹（合并时落盘）：波形匹配失败的句子靠它兜底，
+        # 这样"先增量合成再校准"不会把重做过的那句判定为已删除
+        fingerprints = load_fingerprints(self._output_dir)
+        if fingerprints:
+            self.log.emit(f"已加载声学指纹 {len(fingerprints)} 条")
+
         result = align_sentences_detailed(
             self._modified_wav_path,
             sentence_wavs,
             self._sentences,
             pauses,
             slice_offsets,
+            fingerprints,
         )
         new_starts, scores = result.starts, result.scores
         # 全部未定位 → 音频不含任何分句，直接报错

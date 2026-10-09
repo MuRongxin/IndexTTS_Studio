@@ -11,6 +11,10 @@ from index_tts_gui.core.merger import (
 from index_tts_gui.core.pause_rules import compute_pauses
 from index_tts_gui.core.llm_service import LLMService, LLMServiceError
 from index_tts_gui.core.subtitler import generate_srt_from_sentences_with_pauses
+from index_tts_gui.core.fingerprint import (
+    compute_file as compute_fingerprint,
+    save as save_fingerprints,
+)
 
 
 logger = logging.getLogger("index_tts")
@@ -114,7 +118,32 @@ class MergeWorker(QThread):
         )
         self.log.emit(f"✓ 已生成字幕: {len(entries)} 条")
 
+        # 落盘声学指纹：描述的正是刚被拼进 full_dub.wav 的这一版 take。
+        # 之后即使某句被重新合成，指纹仍描述 full_dub.wav 里的内容 ——
+        # 那才是校准要参照的对象。
+        self._save_fingerprints(wavs)
+
         self.result_ready.emit(entries)
+
+    def _save_fingerprints(self, wavs: list[str]) -> None:
+        """为每句 take 计算并落盘声学指纹（失败不影响合并结果）。"""
+        try:
+            fingerprints = {}
+            for i, path in enumerate(wavs, 1):
+                fps = compute_fingerprint(path)
+                if fps:
+                    fingerprints[i] = fps
+            if not fingerprints:
+                logger.warning("未能生成任何声学指纹，校准将只能依赖波形匹配")
+                return
+            path = save_fingerprints(self._output_dir, fingerprints)
+            if path:
+                self.log.emit(
+                    f"✓ 已保存声学指纹: {len(fingerprints)} 条"
+                    f"（{os.path.basename(path)}）"
+                )
+        except Exception as e:
+            logger.warning("保存声学指纹失败: %s", e)
 
     def _resolve_pauses(self) -> list[float]:
         if self._provided_pauses is not None and len(self._provided_pauses) == len(self._sentences):

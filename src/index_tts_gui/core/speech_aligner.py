@@ -294,6 +294,84 @@ def _interpolate_position(
     return old_starts[i]
 
 
+def _fingerprint_fallback(
+    modified_wav_path: str,
+    fingerprints: dict[int, list[int]],
+    n: int,
+    durations: list[float],
+    starts: list[float],
+    scores: list[float],
+    audio_duration: float,
+) -> tuple[list[float], list[float], int]:
+    """波形匹配失败的句子改用声学指纹定位。
+
+    增量合成 / 单句重新生成会换掉 take 的波形，逐样本互相关必然失败；
+    但"这段话听起来是什么样"没变，MFCC 指纹仍然能定位。
+
+    搜索区间用波形匹配成功的句子在音频里的实际位置夹逼 —— 指纹虽然
+    对波形变化鲁棒，但它只描述音色/音素，不足以单独在全文里唯一定位，
+    有了边界才不会误配到别处。
+
+    Returns:
+        (starts, scores, 命中句数)
+    """
+    pending = [
+        i for i in range(n)
+        if not is_matched(starts[i], scores[i]) and fingerprints.get(i + 1)
+    ]
+    if not pending:
+        return starts, scores, 0
+
+    import librosa
+
+    from index_tts_gui.core import fingerprint as fp_mod
+
+    try:
+        y, sr = librosa.load(modified_wav_path, sr=fp_mod.FINGERPRINT_SR, mono=True)
+    except Exception as e:
+        logger.warning("指纹回退无法读取音频 %s: %s", modified_wav_path, e)
+        return starts, scores, 0
+    if len(y) == 0:
+        return starts, scores, 0
+
+    hop = fp_mod.HOP_LENGTH
+    mfcc_matrix = librosa.feature.mfcc(
+        y=y, sr=fp_mod.FINGERPRINT_SR, n_mfcc=fp_mod.N_MFCC, hop_length=hop,
+    )
+    step_frames = max(1, fp_mod.SEARCH_STEP_SEC * fp_mod.FINGERPRINT_SR // hop)
+
+    # 边界只由波形匹配成功的句子构成，且按音频里的实际先后
+    bounds = _audio_order_bounds(n, starts, scores, audio_duration)
+    hit = 0
+    for i in pending:
+        lo, hi = bounds.get(i, (0.0, audio_duration))
+        # 窗长取该句原始时长：重新合成后时长可能变，但这是最接近的
+        # 先验，滑窗范围本身另有搜索步长覆盖。
+        win_sec = durations[i] if i < len(durations) else fp_mod.DEFAULT_WINDOW_SEC
+        frames = max(1, int(win_sec * fp_mod.FINGERPRINT_SR / hop))
+        pos, dist = fp_mod.locate(
+            fingerprints[i + 1], mfcc_matrix, hop, frames,
+            lo, hi, step_frames, fp_mod.FINGERPRINT_SR,
+        )
+        if pos >= 0 and dist <= fp_mod.MATCH_THRESHOLD:
+            starts[i] = pos
+            # 注意量纲：dist 是余弦距离（阈值 0.08），而 scores 是 NCC 置信度
+            #（阈值 0.5）。指纹通过即视为已匹配，这里必须写成一个 NCC
+            # 语义下的"可信"值，否则后面的缺失标记会把刚救回的句子
+            # 重新判为缺失。
+            scores[i] = CONFIDENCE_THRESHOLD
+            hit += 1
+            logger.info(
+                "指纹匹配: 句%d -> %.2fs (dist=%.4f)", i + 1, pos, dist,
+            )
+        else:
+            logger.info(
+                "指纹匹配未通过: 句%d dist=%.4f（阈值 %.2f）",
+                i + 1, dist, fp_mod.MATCH_THRESHOLD,
+            )
+    return starts, scores, hit
+
+
 def _audio_order_bounds(
     n: int,
     starts: list[float],
@@ -432,6 +510,7 @@ def align_sentences_detailed(
     sentences: list[str],
     original_pauses: list[float],
     slice_offsets: list[list[float]] | None = None,
+    fingerprints: dict[int, list[int]] | None = None,
 ) -> AlignResult:
     """
     在调整后的音频中定位每句原始 WAV 的位置，并给出句内切片的位移。
@@ -453,6 +532,9 @@ def align_sentences_detailed(
     Args:
         slice_offsets: [句][内部停顿秒偏移]，由 subtitler.pause_offsets 产出。
             为 None 或空列表时只做整句对齐，退化为历史上的刚性平移。
+        fingerprints: [句序号(1-based)] -> 声学指纹，由 fingerprint.load 读出。
+            只在波形匹配失败时作为回退使用 —— 它能跨过"重新合成"，
+            但精度不如逐样本互相关。
 
     Returns:
         AlignResult：整句定位 + 句内切片位移
@@ -571,6 +653,17 @@ def align_sentences_detailed(
         # 精修/验证失败：可靠句保留粗匹配位置，提示句判为缺失
         if reliable[i]:
             new_starts[i], scores[i] = coarse_starts[i], coarse_conf[i]
+
+    # ── 声学指纹回退：波形匹配失败的句子改用 MFCC 指纹定位 ──
+    #逐样本互相关无法跨过"重新合成"，指纹可以：它描述的是这段话
+    # 听起来是什么样。只要该句有指纹，就在这里再试一次。
+    if fingerprints:
+        new_starts, scores, hit = _fingerprint_fallback(
+            modified_wav_path, fingerprints, n, original_durations,
+            new_starts, scores, fine_duration,
+        )
+        if hit:
+            logger.info("声学指纹回退定位了 %d 句（波形匹配失败但内容仍在）", hit)
 
     # ── 标记缺失句 ──
     # 精修后置信度仍低于阈值的句子（含能量提示验证失败的），
