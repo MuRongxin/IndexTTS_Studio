@@ -6,6 +6,7 @@ TTS API 客户端抽象层。
 from __future__ import annotations
 
 import base64
+import json
 import os
 from abc import ABC, abstractmethod
 from typing import Any
@@ -257,3 +258,27 @@ def create_client(
 def list_providers() -> list[str]:
     """返回已注册的 provider 列表。"""
     return list(FACTORY.keys())
+
+
+CONFIG_FILE = "config.json"
+
+
+def create_client_from_config(config_path: str = CONFIG_FILE) -> BaseTTSClient:
+    """从 config.json 创建 TTS 客户端。
+
+    供面板独立构造时兜底：MainWindow 在 _setup_central 之后才调用
+    _apply_api 注入客户端，构造期面板用此函数直接按已保存配置创建，
+    避免「未配置 TTS API」的误报。
+    """
+    cfg: dict = {}
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception:
+            pass
+    return create_client(
+        provider=cfg.get("provider", "index_tts"),
+        api_url=cfg.get("api_url", ""),
+        timeout=cfg.get("timeout"),
+    )

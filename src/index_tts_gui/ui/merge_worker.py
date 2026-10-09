@@ -20,10 +20,14 @@ class MergeWorker(QThread):
     """后台合并线程：LLM 停顿建议 → 生成静音 → ffmpeg 合并 → 生成字幕。"""
 
     log = Signal(str)
-    progress = Signal(int, int, str)  # current_step, total_steps, message
+    # 进度为百分比语义：current ∈ [0,100]，total 恒为 100。
+    # 之前的 4 大步制会在 LLM 期间卡在 75%、ffmpeg 期间停在 100%（实际仍在跑），
+    # 改为各阶段映射到区间，长步骤内部有细粒度回调
+    progress = Signal(int, int, str)  # current_percent, 100, message
     # 任务结果信号。不能叫 finished：那会遮蔽 QThread 内置的线程退出信号
     result_ready = Signal(list)       # 字幕条目列表
     error = Signal(str)               # 错误信息
+    canceled = Signal()               # 用户取消
 
     def __init__(
         self,
@@ -57,6 +61,7 @@ class MergeWorker(QThread):
         except RuntimeError as e:
             if str(e) == "合并已取消":
                 self.log.emit("━━━━━━━━━━ 合并已取消 ━━━━━━━━━━")
+                self.canceled.emit()
                 return
             logger.exception("合并完整音频失败")
             self.error.emit(str(e))
@@ -67,7 +72,7 @@ class MergeWorker(QThread):
     def _do_merge(self):
         output_path = os.path.join(self._output_dir, "full_dub.wav")
 
-        self.progress.emit(1, 4, "收集音频片段")
+        self.progress.emit(5, 100, "收集音频片段")
         self.log.emit("开始合并完整音频…")
         wavs = collect_sentence_wavs(self._output_dir)
         logger.info("发现音频片段: %d 个", len(wavs))
@@ -79,7 +84,7 @@ class MergeWorker(QThread):
             )
 
         self._check_canceled()
-        self.progress.emit(2, 4, "校验文件顺序")
+        self.progress.emit(10, 100, "校验文件顺序")
         errors = validate_wav_order(wavs, self._sentences)
         if errors:
             for err in errors:
@@ -87,15 +92,23 @@ class MergeWorker(QThread):
             raise RuntimeError("音频文件与当前句子不匹配，请重新合成")
 
         self._check_canceled()
-        self.progress.emit(3, 4, "获取停顿建议")
+        # 停顿建议阶段映射到 10%→60%：LLM 分块回调驱动进度
+        self.progress.emit(10, 100, "获取停顿建议")
         self.pauses = self._resolve_pauses()
 
         self._check_canceled()
-        self.progress.emit(4, 4, "合并音频并生成字幕")
-        merge_wavs_with_custom_pauses(wavs, self.pauses, output_path)
+        # 合并阶段映射到 60%→95%：逐段生成静音的回调驱动进度
+        self.progress.emit(60, 100, "合并音频并生成字幕")
+        merge_wavs_with_custom_pauses(
+            wavs, self.pauses, output_path,
+            on_progress=lambda c, t, m: self.progress.emit(
+                60 + int(35 * c / t), 100, m
+            ),
+        )
         self.log.emit(f"✓ 已生成完整音频: {output_path}")
 
         self._check_canceled()
+        self.progress.emit(95, 100, "生成字幕")
         entries = generate_srt_from_sentences_with_pauses(
             self._sentences, wavs, self.pauses
         )
@@ -112,10 +125,16 @@ class MergeWorker(QThread):
 
         if service.is_configured():
             self.log.emit("🤖 正在询问 LLM 停顿建议…")
+
+            def _on_pause_progress(c: int, t: int, m: str):
+                self.log.emit(f"  {m}")
+                # LLM 分块进度映射到 10%→60% 区间
+                self.progress.emit(10 + int(50 * c / max(t, 1)), 100, m)
+
             try:
                 pauses = service.advise_pauses(
                     self._sentences,
-                    on_progress=lambda c, t, m: self.log.emit(f"  {m}"),
+                    on_progress=_on_pause_progress,
                 )
                 self.log.emit(f"📐 LLM 停顿建议完成: {len(pauses)} 个")
                 return pauses

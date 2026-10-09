@@ -13,7 +13,7 @@ from PySide6.QtCore import Qt, Signal
 
 from PySide6.QtCore import QThread, Signal
 
-from index_tts_gui.core.tts_client import BaseTTSClient, IndexTTSClient
+from index_tts_gui.core.tts_client import BaseTTSClient, create_client_from_config
 from index_tts_gui.core.project import Project
 from index_tts_gui.core.merger import collect_sentence_wavs, sanitize_for_filename, parse_sentence_wav_name
 from index_tts_gui.ui.merge_worker import MergeWorker
@@ -102,8 +102,8 @@ class SynthesisPanel(QWidget):
         self._project = project
         if client is None:
             try:
-                client = IndexTTSClient()
-            except ValueError as e:
+                client = create_client_from_config()
+            except Exception as e:
                 logger.warning("未配置 TTS API: %s", e)
                 client = None
         self._client = client
@@ -747,8 +747,10 @@ class SynthesisPanel(QWidget):
         self._merge_worker.progress.connect(self._on_merge_progress)
         self._merge_worker.result_ready.connect(self._on_merge_finished)
         self._merge_worker.error.connect(self._on_merge_error)
-        self._merge_worker.result_ready.connect(self._on_merge_worker_finished)
-        self._merge_worker.error.connect(self._on_merge_worker_finished)
+        self._merge_worker.canceled.connect(self._on_merge_canceled)
+        # 生命周期清理挂在 QThread 内置 finished 上：正常完成、失败、取消
+        # 都会触发，保证按钮状态与进度条复位
+        self._merge_worker.finished.connect(self._on_merge_worker_finished)
         self._btn_clear_output.setEnabled(False)
         self._merge_worker.start()
 
@@ -758,12 +760,12 @@ class SynthesisPanel(QWidget):
         self._merge_full_audio(force_refresh_pauses=True)
 
     def _on_merge_progress(self, current: int, total: int, message: str):
+        # MergeWorker 发的是百分比语义（total 恒为 100）
         self._progress.setMaximum(total)
         self._progress.setValue(current)
-        self._status_label.setText(f"合并中 [{current}/{total}]: {message}")
+        self._status_label.setText(f"合并中 {current}%: {message}")
 
     def _on_merge_finished(self, entries: list):
-        self._btn_clear_output.setEnabled(True)
         # 工程已切换时丢弃旧合并结果，不写入新工程
         sender = self.sender()
         expected = sender.property("project_dir") if sender is not None else ""
@@ -786,16 +788,25 @@ class SynthesisPanel(QWidget):
     def _on_merge_error(self, msg: str):
         self._log_msg(f"✗ 合并失败: {msg}")
         self._status_label.setText("合并失败")
-        self._btn_merge.setEnabled(True)
-        self._btn_refresh_pauses.setEnabled(True)
-        self._btn_clear_output.setEnabled(True)
+        self._progress.setValue(0)
+
+    def _on_merge_canceled(self):
+        self._status_label.setText("合并已取消")
+        self._progress.setValue(0)
 
     def _on_merge_worker_finished(self):
-        """worker 生命周期结束，安全清理引用，不访问其成员。"""
+        """merge worker 生命周期结束，安全清理引用并恢复按钮。
+
+        挂在 QThread 内置 finished 上：正常完成、失败、取消都会触发；
+        取消路径 result_ready/error 均不发射，此前挂在两者之上会导致
+        合并按钮永久禁用。
+        """
         if self._merge_worker is not None:
             self._merge_worker.deleteLater()
             self._merge_worker = None
+        self._btn_merge.setEnabled(True)
         self._btn_refresh_pauses.setEnabled(True)
+        self._btn_clear_output.setEnabled(True)
 
     def set_client(self, client: BaseTTSClient):
         """外部（如 MainWindow）动态切换 API 客户端。"""

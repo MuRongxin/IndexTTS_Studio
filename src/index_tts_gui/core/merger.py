@@ -140,6 +140,7 @@ def merge_wavs_with_custom_pauses(
     wav_paths: list[str],
     pauses: list[float],
     output_path: str,
+    on_progress: "callable | None" = None,
 ):
     """
     合并 WAV 片段，使用自定义停顿时长。
@@ -148,6 +149,7 @@ def merge_wavs_with_custom_pauses(
         wav_paths: WAV 文件路径列表
         pauses: 每段之后的停顿时长列表，长度应与 wav_paths 相同
         output_path: 输出文件路径
+        on_progress: 进度回调 (current, total, message)，逐段生成静音时触发
     """
     if not wav_paths:
         raise ValueError("没有可合并的音频文件")
@@ -158,9 +160,12 @@ def merge_wavs_with_custom_pauses(
 
     logger.info("自定义停顿合并: files=%d pauses=%s", len(wav_paths), pauses)
 
+    total = len(wav_paths)
     with tempfile.TemporaryDirectory(prefix="tts_merge_") as tmpdir:
         concat_items: list[str] = []
         for i, path in enumerate(wav_paths):
+            if on_progress:
+                on_progress(i + 1, total, f"合并片段 {i + 1}/{total}")
             concat_items.append(path)
             pause = pauses[i] if i < len(pauses) else 0.0
             if pause > 0:

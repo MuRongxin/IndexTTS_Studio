@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt, QSize, Signal, QUrl, QEvent
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 
-from index_tts_gui.core.tts_client import BaseTTSClient, IndexTTSClient
+from index_tts_gui.core.tts_client import BaseTTSClient, create_client_from_config
 from index_tts_gui.core.project import Project
 from index_tts_gui.ui.voice_upload_worker import VoiceUploadWorker
 
@@ -73,8 +73,8 @@ class VoicePanel(QWidget):
         self._project = project
         if client is None:
             try:
-                client = IndexTTSClient()
-            except ValueError as e:
+                client = create_client_from_config()
+            except Exception as e:
                 logger.warning("未配置 TTS API: %s", e)
                 client = None
         self._client = client
