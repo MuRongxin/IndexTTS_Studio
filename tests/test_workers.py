@@ -22,6 +22,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication
 
 from index_tts_gui.ui.voice_upload_worker import VoiceUploadWorker
+from index_tts_gui.core.project import Project
 from index_tts_gui.ui import synthesis_worker
 from index_tts_gui.ui.synthesis_worker import SynthesisWorker
 from index_tts_gui.ui.merge_worker import MergeWorker
@@ -318,6 +319,40 @@ def test_single_regenerate_failure(tmp_path, qapp, monkeypatch):
     assert len(results) == 1
     assert results[0][0]["status"] == "failed"
     assert "bad" in results[0][0]["error"]
+
+
+def test_panel_regenerate_single_resets_was_canceled(qapp, tmp_path, monkeypatch):
+    """回归：批量合成取消后，单句重生成的结果不能被丢弃。
+
+    _was_canceled 只在 _start() 里复位，而单句重生成复用 _on_finished，
+    后者开头按这个标志早退 —— 残留的 True 会让这一句的成功结果整体被丢。
+    """
+    from index_tts_gui.ui.synthesis_panel import SynthesisPanel
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    project = Project(project_dir=str(project_dir))
+    panel = SynthesisPanel(project, client=_FakeSynthClient([b"x"]))
+    panel.set_sentences(["hello", "world"])
+    panel._output_dir = str(tmp_path / "out")
+
+    # 模拟"批量合成被用户停止"后的残留状态
+    panel._was_canceled = True
+
+    monkeypatch.setattr(synthesis_worker, "RETRY_DELAYS", (0.0, 0.0))
+    panel._client = _FakeSynthClient([b"regen"])
+    panel._regenerate_single(1)
+    _wait_for_worker(panel._single_worker, qapp)
+    qapp.processEvents()
+
+    # 标志必须已被复位，否则 _on_finished 会走"已停止"分支
+    assert panel._was_canceled is False
+    # wav_map 必须真的写入这一句
+    assert [e["index"] for e in panel._project.wav_map] == [1]
+    assert panel._project.wav_map[0]["status"] == "ok"
+
+    panel.deleteLater()
+    qapp.processEvents()
 
 
 def test_synthesis_worker_cancel_interrupts_backoff(tmp_path, qapp, monkeypatch):

@@ -210,7 +210,7 @@ pytest -v
 | 📄 字幕 | 63 | `test_subtitle.py` 13 · `test_subtitler.py` 14 · `test_subtitle_panel.py` 12 · `test_io_subtitle.py` 13 · `test_dub_planner.py` 11 |
 | 💾 工程 | 15 | `test_project.py` 6 · `test_project_extra.py` 9 |
 | 🎨 ASS 导出 | 2 | `test_io_ass.py` |
-| ⚚️ 变速 | 7 | `test_audio_speed.py` |
+| 🎚️ 变速 | 7 | `test_audio_speed.py` |
 | 🌊 波形 | 8 | `test_audio_engine.py` |
 | ⚙️ Worker | 17 | `test_workers.py` |
 | ✏️ 编辑器 | 7 | `test_editor_table.py` |

@@ -551,6 +551,13 @@ class SynthesisPanel(QWidget):
             self._retire_worker(self._single_worker)
             self._single_worker = None
 
+        # _was_canceled 是"上一次操作被用户取消"的标志，只在 _start() 里复位。
+        # 单句重生成复用 _on_finished，而 _on_finished 开头就按这个标志早退，
+        # 所以这里必须复位：否则"批量合成点停止 → 重新生成某句"会因为残留的
+        # True 而把这一句的成功结果整体丢弃 —— WAV 写了盘但 wav_map 不更新、
+        # 片段列表不刷新、状态栏还显示"已停止"。
+        self._was_canceled = False
+
         self._btn_regen_single.setEnabled(False)
         self._single_worker = SynthesisWorker(
             self._sentences, self._audio_name,
