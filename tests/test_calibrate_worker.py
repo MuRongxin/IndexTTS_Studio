@@ -217,10 +217,11 @@ def test_calibrate_success_emits_signals(tmp_path, qapp):
     # log 至少包含"开始校准"和"校准完成"
     assert any("开始校准" in log for log in logs)
     assert any("校准完成" in log for log in logs)
-    # progress 3 步
-    assert len(progress) == 3
+    # progress 至少覆盖 3 个阶段；对齐阶段还会细分出句级进度
+    assert len(progress) >= 3
     assert progress[0][0] == 1
     assert progress[-1][0] == 3
+    assert all(p[1] == 3 for p in progress)
 
     worker.deleteLater()
     qapp.processEvents()
@@ -484,7 +485,7 @@ def test_calibrate_lifecycle_deleteLater_safe(tmp_path, qapp):
 
 @pytest.mark.skipif(not FFMPEG_AVAILABLE, reason="ffmpeg/ffprobe 不可用")
 def test_calibrate_progress_signal_format(tmp_path, qapp):
-    """progress 信号应按 (current, total, message) 格式 emit 3 次。"""
+    """progress 信号应按 (current, total, message) 格式，覆盖全部 3 个阶段。"""
     full, sentence_wavs, sentences, pauses, entries = _make_project(
         tmp_path, n_sentences=2, durations=[0.4, 0.4],
         pauses=[0.2, 0.0], modified_pauses=[0.2, 0.0],
@@ -503,14 +504,17 @@ def test_calibrate_progress_signal_format(tmp_path, qapp):
     worker.start()
     _wait_for_worker(worker, qapp)
 
-    assert len(progress) == 3
-    # 每步的 current 应该是 1, 2, 3
-    currents = [p[0] for p in progress]
-    assert currents == [1, 2, 3]
+    # 对齐阶段会按句细分进度，所以次数多于 3；但每个阶段都要出现
+    assert len(progress) >= 3
+    assert [p[0] for p in progress][0] == 1
+    assert [p[0] for p in progress][-1] == 3
+    assert set(p[0] for p in progress) == {1, 2, 3}
     # total 都是 3
     assert all(p[1] == 3 for p in progress)
-    # message 是字符串
+    # message 是非空字符串
     assert all(isinstance(p[2], str) and p[2] for p in progress)
+    # 对齐阶段应当带上句级进度，让长项目看起来没卡死
+    assert any("粗匹配定位" in p[2] for p in progress), progress
 
     worker.deleteLater()
     qapp.processEvents()

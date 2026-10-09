@@ -18,7 +18,7 @@
 import logging
 from bisect import bisect_right
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import librosa
@@ -500,6 +500,8 @@ def align_sentences_detailed(
     original_pauses: list[float],
     slice_offsets: list[list[float]] | None = None,
     fingerprints: dict[int, list[int]] | None = None,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> AlignResult:
     """
     在调整后的音频中定位每句原始 WAV 的位置，并给出句内切片的位移。
@@ -522,8 +524,12 @@ def align_sentences_detailed(
         slice_offsets: [句][内部停顿秒偏移]，由 subtitler.pause_offsets 产出。
             为 None 或空列表时只做整句对齐，退化为历史上的刚性平移。
         fingerprints: [句序号(1-based)] -> 声学指纹，由 fingerprint.load 读出。
-            只在波形匹配失败时作为回退使用 —— 它能跨过"重新合成"，
-            但精度不如逐样本互相关。
+            只在波形匹配失败时作为回退使用（当前已停用，见 _fingerprint_fallback）。
+        on_progress: (done, total, stage) -> None，用于上报进度。
+            全量校准在真实项目上要跑半小时以上，没有进度条界面看起来
+            就是卡死，所以每个阶段结束时回调一次。
+        should_cancel: -> bool，返回 True 时提前放弃并返回当前已有的
+            （可能不完整的）结果。逐句检查，粒度就是单句的匹配开销。
 
     Returns:
         AlignResult：整句定位 + 句内切片位移
@@ -531,6 +537,13 @@ def align_sentences_detailed(
     n = len(sentence_wavs)
     if n == 0:
         return AlignResult([], [], [])
+
+    def _report(done: int, stage: str) -> None:
+        if on_progress is not None:
+            on_progress(done, n, stage)
+
+    def _aborted() -> bool:
+        return should_cancel is not None and should_cancel()
 
     original_durations = [get_wav_duration(p) for p in sentence_wavs]
     old_starts = cumulative_starts(original_durations, original_pauses)
@@ -545,6 +558,9 @@ def align_sentences_detailed(
     coarse_conf = [0.0] * n
     templates_coarse: list[np.ndarray] = []
     for i in range(n):
+        if _aborted():
+            logger.info("对齐被取消（粗匹配阶段，第 %d/%d 句）", i + 1, n)
+            return AlignResult([], [], [])
         tpl = _load_mono(sentence_wavs[i], COARSE_SR)
         templates_coarse.append(tpl)
         if len(tpl) == 0 or len(tpl) > len(full_coarse):
@@ -556,6 +572,9 @@ def align_sentences_detailed(
         coarse_starts[i] = st
         coarse_conf[i] = cf
         logger.debug("句子 %d/%d 粗匹配: start=%.3f conf=%.3f", i + 1, n, st, cf)
+        # 粗匹配是耗时主体（546 句约半小时），不报进度界面就像卡死
+        if on_progress is not None and (i % 5 == 0 or i + 1 == n):
+            _report(i + 1, "粗匹配定位")
 
     # 只按置信度判可靠性，不比较与原始位置的偏差：
     # 调整过后的音频本身就可能把句子移到任意位置（重排/增删停顿），
@@ -616,6 +635,9 @@ def align_sentences_detailed(
     new_starts = [-1.0] * n
     scores = [-1.0] * n
     for i in range(n):
+        if _aborted():
+            logger.info("对齐被取消（精修阶段，第 %d/%d 句）", i + 1, n)
+            break
         if reliable[i]:
             center, margin = coarse_starts[i], REFINE_MARGIN
         elif i in hints:
@@ -642,6 +664,10 @@ def align_sentences_detailed(
         # 精修/验证失败：可靠句保留粗匹配位置，提示句判为缺失
         if reliable[i]:
             new_starts[i], scores[i] = coarse_starts[i], coarse_conf[i]
+        if on_progress is not None and (i % 5 == 0 or i + 1 == n):
+            _report(i + 1, "精修定位")
+
+    _report(n, "句内切片定位")
 
     # ── 声学指纹回退：波形匹配失败的句子改用 MFCC 指纹定位 ──
     # 该路径已被实测证伪并停用（变速/变调下不可靠，且会假阳性地把

@@ -125,16 +125,28 @@ class DubCalibrateWorker(QThread):
         slice_offsets = [
             pause_offsets(p, get_wav_duration(p)) for p in segment_wavs
         ]
-        # 声学指纹（配音时落盘）：某段被重新配音时靠它兜底定位
+        # 声学指纹（配音时落盘）：当前不参与定位（实测对变速/变调不可靠），
+        # 仍在读取并落日志，便于将来算法改进后直接复用
         fingerprints = load_fingerprints(self._dub_dir)
         if fingerprints:
-            self.log.emit(f"已加载声学指纹 {len(fingerprints)} 条")
+            self.log.emit(f"已加载声学指纹 {len(fingerprints)} 条（当前不参与定位）")
+
+        total = max(1, len(segment_wavs))
+
+        def _on_progress(done: int, _total: int, stage: str) -> None:
+            self.progress.emit(3, 4, f"{stage} {done}/{total}")
 
         result = align_sentences_detailed(
             self._modified_wav_path, segment_wavs, texts, pauses,
             slice_offsets, fingerprints,
+            on_progress=_on_progress,
+            should_cancel=lambda: self._canceled,
         )
         new_starts, scores = result.starts, result.scores
+        if not new_starts:
+            # 对齐中途被取消：不是"音频里一句都找不到"，别报成误导性的错
+            self.canceled.emit()
+            return
         # 失败判据与CalibrateWorker 统一走 is_matched，不再各自判断
         unreliable = [i + 1 for i in range(len(scores))
                        if not is_matched(new_starts[i], scores[i])]

@@ -90,11 +90,17 @@ class CalibrateWorker(QThread):
         slice_offsets = [
             pause_offsets(p, get_wav_duration(p)) for p in sentence_wavs
         ]
-        # 声学指纹（合并时落盘）：波形匹配失败的句子靠它兜底，
-        # 这样"先增量合成再校准"不会把重做过的那句判定为已删除
+        # 声学指纹（合并时落盘）：当前不参与定位（实测对变速/变调
+        # 不可靠），仍在读取并落日志，便于将来算法改进后直接复用
         fingerprints = load_fingerprints(self._output_dir)
         if fingerprints:
-            self.log.emit(f"已加载声学指纹 {len(fingerprints)} 条")
+            self.log.emit(f"已加载声学指纹 {len(fingerprints)} 条（当前不参与定位）")
+
+        total = max(1, len(sentence_wavs))
+
+        def _on_progress(done: int, _total: int, stage: str) -> None:
+            # 校准在长项目上要跑半小时以上，不报进度界面就像卡死
+            self.progress.emit(2, 3, f"{stage} {done}/{total}")
 
         result = align_sentences_detailed(
             self._modified_wav_path,
@@ -103,8 +109,14 @@ class CalibrateWorker(QThread):
             pauses,
             slice_offsets,
             fingerprints,
+            on_progress=_on_progress,
+            should_cancel=lambda: self._canceled,
         )
         new_starts, scores = result.starts, result.scores
+        if not new_starts:
+            # 对齐中途被取消：不是"音频里一句都找不到"，别报成误导性的错
+            self.canceled.emit()
+            return
         # 全部未定位 → 音频不含任何分句，直接报错
         missing = [i + 1 for i in range(len(new_starts))
                    if not is_matched(new_starts[i], scores[i])]

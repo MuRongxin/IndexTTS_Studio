@@ -8,7 +8,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-218%20passed-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-220%20passed-brightgreen?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square)
 
 </div>
@@ -223,14 +223,14 @@ pytest -v
 无头环境（CI / 服务器）无需额外变量：`tests/conftest.py` 会在 import PySide6
 之前设好 `QT_QPA_PLATFORM=offscreen` 并把 `src` 注入 `sys.path`。
 
-**218 个测试**覆盖：
+**220 个测试**覆盖：
 
 | 类别 | 数量 | 文件 |
 |---|---:|---|
 | 🧠 核心 | 8 | `test_core.py` |
 | ✂️ LLM 服务 | 19 | `test_llm_service.py` |
 | 🔗 合并 | 15 | `test_merger.py` |
-| 🎯 校准算法 | 34 | `test_speech_aligner.py` |
+| 🎯 校准算法 | 36 | `test_speech_aligner.py` |
 | 🔄 校准 Worker | 10 | `test_calibrate_worker.py` |
 | 📄 字幕 | 65 | `test_subtitle.py` 13 · `test_subtitler.py` 16 · `test_subtitle_panel.py` 12 · `test_io_subtitle.py` 13 · `test_dub_planner.py` 11 |
 | 🔊 声学指纹 | 9 | `test_fingerprint.py` |
