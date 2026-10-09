@@ -8,7 +8,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-217%20passed-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-218%20passed-brightgreen?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square)
 
 </div>
@@ -149,6 +149,8 @@ index-tts-studio               # 📦 安装后的 console script
 > ⚠️ **支持边界**：定位依赖原 TTS 波形逐样本存在，因此**重新合成过的句子
 > 无法定位**（两遍 TTS 波形不同），会被移除并列出句号。同一句内**调换两半
 > 顺序**时单条连续字幕无法表达，会被移除并提示，需手工拆分。
+> **近乎静音的分句**（实测存在 0.01s、RMS=3e-6 的片段）同样判缺失 ——
+> 静音之间互相匹配没有意义，否则一批静音句会全部堆到同一个任意位置上。
 >
 > 曾尝试用 MFCC 声学指纹跨过"重新合成"，在真实项目上实测后**已停用**：
 > 指纹对音量变化免疫，但对换 take 必然带来的变速/变调不可靠（10 句里 9 句
@@ -221,14 +223,14 @@ pytest -v
 无头环境（CI / 服务器）无需额外变量：`tests/conftest.py` 会在 import PySide6
 之前设好 `QT_QPA_PLATFORM=offscreen` 并把 `src` 注入 `sys.path`。
 
-**217 个测试**覆盖：
+**218 个测试**覆盖：
 
 | 类别 | 数量 | 文件 |
 |---|---:|---|
 | 🧠 核心 | 8 | `test_core.py` |
 | ✂️ LLM 服务 | 19 | `test_llm_service.py` |
 | 🔗 合并 | 15 | `test_merger.py` |
-| 🎯 校准算法 | 33 | `test_speech_aligner.py` |
+| 🎯 校准算法 | 34 | `test_speech_aligner.py` |
 | 🔄 校准 Worker | 10 | `test_calibrate_worker.py` |
 | 📄 字幕 | 65 | `test_subtitle.py` 13 · `test_subtitler.py` 16 · `test_subtitle_panel.py` 12 · `test_io_subtitle.py` 13 · `test_dub_planner.py` 11 |
 | 🔊 声学指纹 | 9 | `test_fingerprint.py` |
