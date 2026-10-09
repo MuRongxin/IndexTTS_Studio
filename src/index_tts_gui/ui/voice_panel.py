@@ -7,7 +7,9 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QAbstractItemView,
     QSlider, QLineEdit,
 )
-from PySide6.QtCore import Qt, QSize, Signal, QUrl, QEvent
+import tempfile
+
+from PySide6.QtCore import Qt, QSize, Signal, QUrl, QEvent, QThread
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 
@@ -17,6 +19,60 @@ from index_tts_gui.ui.voice_upload_worker import VoiceUploadWorker
 
 
 logger = logging.getLogger("index_tts")
+
+
+class SpeedChangeWorker(QThread):
+    """后台执行 ffmpeg 变速。
+
+    变速必须离开 GUI 线程：ffmpeg 一次跑几秒到几十秒，放在按钮槽里会
+    冻结整个界面且无法取消。overwrite=True 时先写临时文件再 os.replace
+    —— ffmpeg 不能输入输出同一文件（会先截断输出再读输入）。
+    """
+
+    log = Signal(str)
+    succeeded = Signal(str)   # 实际输出路径
+    failed = Signal(str)
+
+    def __init__(self, src: str, rate: float, out_path: str,
+                 overwrite: bool = False, parent=None):
+        super().__init__(parent)
+        self._src = src
+        self._rate = rate
+        self._out_path = out_path
+        self._overwrite = overwrite
+
+    def cancel(self):
+        self.requestInterruption()
+
+    def run(self):
+        tmp_path = None
+        try:
+            dst = self._out_path
+            if self._overwrite:
+                out_dir = os.path.dirname(self._out_path) or "."
+                fd, tmp_path = tempfile.mkstemp(
+                    suffix=".wav", prefix="speed_", dir=out_dir
+                )
+                os.close(fd)
+                dst = tmp_path
+            from index_tts_gui.core.audio_speed import change_audio_speed
+            change_audio_speed(self._src, dst, self._rate)
+            if self.isInterruptionRequested():
+                self.log.emit("已取消变速")
+                return
+            if tmp_path:
+                os.replace(tmp_path, self._out_path)
+                tmp_path = None
+            self.succeeded.emit(self._out_path)
+        except Exception as e:
+            logger.exception("变速失败: %s", self._src)
+            self.failed.emit(str(e))
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
 
 class _AudioListItem(QWidget):
@@ -81,6 +137,7 @@ class VoicePanel(QWidget):
         self._audio_path: str = ""
         self._audio_name: str = ""
         self._worker: VoiceUploadWorker | None = None
+        self._speed_worker: SpeedChangeWorker | None = None
         self._player = QMediaPlayer()
         self._audio_output = QAudioOutput()
         self._player.setAudioOutput(self._audio_output)
@@ -537,15 +594,57 @@ class VoicePanel(QWidget):
         rate = self._ref_speed_slider.value() / 100.0
         if abs(rate - 1.0) < 0.01:
             return  # 1.0x 不处理
-        from index_tts_gui.core.audio_speed import change_audio_speed
         base = os.path.splitext(self._audio_path)[0]
         out_path = f"{base}_{rate:.1f}x.wav"
-        try:
-            change_audio_speed(self._audio_path, out_path, rate)
-            self._load_audio(out_path)
-            self._log_msg(f"✅ 变速完成: {os.path.basename(out_path)} ({rate:.1f}x)")
-        except RuntimeError as e:
-            self._log_msg(f"✗ 变速失败: {e}")
+        self._start_speed_change(
+            self._audio_path, rate, out_path, overwrite=False,
+            on_done=lambda p: self._on_reference_speed_done(p, rate),
+        )
+
+    def _on_reference_speed_done(self, out_path: str, rate: float) -> None:
+        self._load_audio(out_path)
+        self._log_msg(f"✅ 变速完成: {os.path.basename(out_path)} ({rate:.1f}x)")
+
+    def _start_speed_change(
+        self, src: str, rate: float, out_path: str,
+        overwrite: bool, on_done,
+    ) -> None:
+        """启动后台变速任务，并锁住变速控件直到任务结束。"""
+        if self._speed_worker is not None and self._speed_worker.isRunning():
+            self._log_msg("⚠ 已有变速任务在运行，请稍候")
+            return
+        if self._speed_worker is not None:
+            self._speed_worker.deleteLater()
+            self._speed_worker = None
+        self._set_speed_controls_enabled(False)
+        self._speed_worker = SpeedChangeWorker(
+            src, rate, out_path, overwrite=overwrite, parent=self
+        )
+        self._speed_worker.log.connect(self._log_msg)
+        self._speed_worker.succeeded.connect(on_done)
+        self._speed_worker.failed.connect(self._on_speed_change_failed)
+        self._speed_worker.finished.connect(self._on_speed_worker_finished)
+        self._speed_worker.start()
+
+    def _on_speed_change_failed(self, msg: str) -> None:
+        self._log_msg(f"✗ 变速失败: {msg}")
+
+    def _on_speed_worker_finished(self) -> None:
+        worker = self._speed_worker
+        self._speed_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self._set_speed_controls_enabled(True)
+
+    def _set_speed_controls_enabled(self, enabled: bool) -> None:
+        """变速期间禁用变速控件。
+
+        片段变速会 os.replace 覆盖 sentence_NN_*.wav，若与批量合成并发，
+        两者会互相覆盖对方的输出。
+        """
+        for slider in (self._ref_speed_slider, self._seg_speed_slider):
+            slider.setEnabled(enabled)
+        self._seg_speed_panel.setEnabled(enabled)
 
     def _apply_speed_to_segment(self):
         """对选中的生成片段变速，直接覆盖原文件。"""
@@ -564,22 +663,12 @@ class VoicePanel(QWidget):
         if not target:
             self._log_msg(f"⚠ 未找到第 {self._selected_segment_index + 1} 句的音频文件")
             return
-        from index_tts_gui.core.audio_speed import change_audio_speed
-        import tempfile
-        try:
-            # ffmpeg 不能直接输入输出同一文件，先写入临时文件再替换
-            fd, tmp_path = tempfile.mkstemp(suffix=".wav", prefix="speed_", dir=output_dir)
-            os.close(fd)
-            try:
-                change_audio_speed(target, tmp_path, rate)
-                os.replace(tmp_path, target)
-            except Exception:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-                raise
-            self._log_msg(f"✅ 片段变速完成: {os.path.basename(target)} ({rate:.1f}x)")
-        except RuntimeError as e:
-            self._log_msg(f"✗ 变速失败: {e}")
+        self._start_speed_change(
+            target, rate, target, overwrite=True,
+            on_done=lambda p: self._log_msg(
+                f"✅ 片段变速完成: {os.path.basename(p)} ({rate:.1f}x)"
+            ),
+        )
 
     def _log_msg(self, msg: str):
         """发送日志到合成面板。"""
@@ -710,17 +799,10 @@ class VoicePanel(QWidget):
             return
 
         if self._worker is not None:
+            # 全断而不是逐个列举：手工列表上次就漏掉了 finished
             try:
-                self._worker.success.disconnect()
-            except Exception:
-                pass
-            try:
-                self._worker.error.disconnect()
-            except Exception:
-                pass
-            try:
-                self._worker.result_ready.disconnect()
-            except Exception:
+                self._worker.disconnect()
+            except (RuntimeError, TypeError):
                 pass
             self._worker.deleteLater()
             self._worker = None
@@ -735,7 +817,9 @@ class VoicePanel(QWidget):
         self._worker.success.connect(self._on_upload_success)
         self._worker.error.connect(self._on_upload_error)
         self._worker.result_ready.connect(self._on_upload_finished)
-        self._worker.result_ready.connect(self._on_worker_lifetime_finished)
+        # 生命周期挂 finished：run() 抛异常时 result_ready 不会发，
+        # 挂在它上面会让 worker 永远不被释放、上传按钮永久禁用
+        self._worker.finished.connect(self._on_worker_lifetime_finished)
         self._worker.start()
 
     def _on_upload_success(self, audio_name: str):
@@ -752,9 +836,13 @@ class VoicePanel(QWidget):
 
     def _on_worker_lifetime_finished(self):
         """worker 生命周期结束，安全清理引用，不访问其成员。"""
-        if self._worker is not None:
-            self._worker.deleteLater()
-            self._worker = None
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            try:
+                worker.deleteLater()
+            except RuntimeError:
+                pass
 
     def set_client(self, client: BaseTTSClient):
         """外部（如 MainWindow）动态切换 API 客户端。"""
@@ -803,21 +891,25 @@ class VoicePanel(QWidget):
         return self._audio_name
 
     def cancel_workers(self):
-        """停止上传任务与播放器（应用退出时由主窗口调用）。"""
+        """停止上传/变速任务与播放器（应用退出时由主窗口调用）。"""
         try:
             self._player.stop()
         except Exception:
             pass
-        if self._worker is not None:
+        for worker in (self._worker, self._speed_worker):
+            if worker is None:
+                continue
             try:
-                self._worker.disconnect()
+                worker.disconnect()
             except Exception:
                 pass
-            cancel = getattr(self._worker, "cancel", None)
+            cancel = getattr(worker, "cancel", None)
             if callable(cancel):
                 cancel()
-            if self._worker.isRunning():
-                self._worker.wait(2000)
-            if self._worker.isRunning():
-                self._worker.terminate()
-                self._worker.wait(1000)
+            if worker.isRunning():
+                worker.wait(2000)
+            if worker.isRunning():
+                worker.terminate()
+                worker.wait(1000)
+        self._worker = None
+        self._speed_worker = None

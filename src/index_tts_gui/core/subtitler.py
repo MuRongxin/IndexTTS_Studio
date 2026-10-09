@@ -44,15 +44,26 @@ def _build_entries_for_sentence(
     # 导致块边界越过 end_t、最后一块 start > end（负时长字幕）。
     # 地板按句长缩放，保证 sum(floor) <= dur。
     floor = min(0.8, dur / len(chunks)) if chunks else 0.8
+    # 取 max(比例时长, 地板) 后总量仍可能超过 dur，先按比例缩回，
+    # 保证 sum(allocs) == dur，游标不会越过 end_t。
+    allocs: list[float] = []
+    for c in chunks:
+        ratio = len(c) / total_cc if total_cc > 0 else 1 / len(chunks)
+        allocs.append(max(ratio * dur, floor))
+    total_alloc = sum(allocs)
+    if dur > 0 and total_alloc > dur:
+        allocs = [a * (dur / total_alloc) for a in allocs]
+
     chunk_start = start_t
     for ci, c in enumerate(chunks):
-        ratio = len(c) / total_cc if total_cc > 0 else 1 / len(chunks)
-        chunk_end = chunk_start + max(ratio * dur, floor)
+        chunk_end = chunk_start + allocs[ci]
         if ci == len(chunks) - 1:
             chunk_end = end_t
         else:
             # 中间块不越过句尾，避免侵占下一句的时段
             chunk_end = min(chunk_end, end_t)
+        # 兜底：绝不产生结束早于开始的负时长条目
+        chunk_end = max(chunk_end, chunk_start)
 
         entries.append(SubtitleEntry(entry_index, chunk_start, chunk_end, c))
         entry_index += 1

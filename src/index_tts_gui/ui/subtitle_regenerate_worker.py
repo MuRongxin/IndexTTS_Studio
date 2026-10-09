@@ -31,11 +31,21 @@ class SubtitleRegenerateWorker(QThread):
         self._output_dir = output_dir
         self._pauses = pauses
 
+    def cancel(self) -> None:
+        """请求中断：run() 会在每个步骤之间检查并立即返回，不发出信号。"""
+        self.requestInterruption()
+
     def run(self):
+        # 每一步之间检查中断请求：ffprobe 与生成都是不可切分的耗时操作，
+        # 只能在它们的边界上让出，保证 cancel() 后线程能尽快退出。
+        if self.isInterruptionRequested():
+            return
         try:
             # 必须按文件名中的数字序号排序：sentence_100 按字典序会排在
             # sentence_10 前面，直接 sorted() 会在 ≥100 句时错序
             wavs = collect_sentence_wavs(self._output_dir)
+            if self.isInterruptionRequested():
+                return
             if not wavs:
                 self.error.emit(f"{self._output_dir}/ 下无分句 WAV")
                 return
@@ -53,6 +63,8 @@ class SubtitleRegenerateWorker(QThread):
                 entries = generate_srt_from_sentences(
                     self._sentences, wavs
                 )
+            if self.isInterruptionRequested():
+                return
             self.result_ready.emit(entries)
         except Exception as e:
             logger.exception("字幕重新生成失败")

@@ -9,7 +9,11 @@ from PySide6.QtCore import QThread, Signal
 from index_tts_gui.core.io_ass import entries_to_ass
 from index_tts_gui.core.io_subtitle import parse_srt
 from index_tts_gui.core.merger import get_wav_duration
-from index_tts_gui.core.speech_aligner import align_sentences, recalibrate_entries
+from index_tts_gui.core.speech_aligner import (
+    align_sentences,
+    is_matched,
+    recalibrate_entries,
+)
 from index_tts_gui.core.subtitle import SubtitleEntry
 from index_tts_gui.core.subtitler import entries_to_srt
 
@@ -34,16 +38,27 @@ class DubCalibrateWorker(QThread):
     # 任务结果信号。不能叫 finished：那会遮蔽 QThread 内置的线程退出信号
     result_ready = Signal(list)  # 校准后的 SubtitleEntry 列表（失败/取消为空列表）
     error = Signal(str)
+    canceled = Signal()
 
     def __init__(self, modified_wav_path: str, dub_dir: str, export_ass: bool = False):
         super().__init__()
         self._modified_wav_path = modified_wav_path
         self._dub_dir = dub_dir
         self._export_ass = export_ass
-        self._canceled = False
 
     def cancel(self):
-        self._canceled = True
+        """请求取消。用 Qt 的 interruption 机制。"""
+        self.requestInterruption()
+
+    @property
+    def _canceled(self) -> bool:
+        """是否已请求取消（保留旧属性名，兼容既有调用与测试）。"""
+        return self.isInterruptionRequested()
+
+    def _emit_canceled(self) -> None:
+        """统一取消出口：发 canceled，面板据此显示"已取消"而非"校准失败"。"""
+        self.canceled.emit()
+        self.result_ready.emit([])
 
     def run(self):
         try:
@@ -62,6 +77,8 @@ class DubCalibrateWorker(QThread):
         if not os.path.exists(shifted_srt):
             raise RuntimeError(f"未找到基准字幕 {shifted_srt}，请先完成配音")
         entries = parse_srt(shifted_srt)
+        if not entries:
+            raise RuntimeError(f"基准字幕为空: {shifted_srt}")
         self.log.emit(f"基准字幕: {len(entries)} 条")
 
         # 2. 收集分段音频（排除 dub_full.wav）
@@ -77,7 +94,7 @@ class DubCalibrateWorker(QThread):
         self.log.emit(f"已找到 {len(segment_wavs)} 个配音分段")
 
         if self._canceled:
-            self.result_ready.emit([])
+            self._emit_canceled()
             return
 
         # 3. 片头归零：基准时间轴平移到 0 起点，段后间隔作为对齐先验
@@ -94,7 +111,7 @@ class DubCalibrateWorker(QThread):
         ]
 
         if self._canceled:
-            self.result_ready.emit([])
+            self._emit_canceled()
             return
 
         # 4. 对齐：在修改后音频中定位每个分段
@@ -103,7 +120,9 @@ class DubCalibrateWorker(QThread):
         new_starts, scores = align_sentences(
             self._modified_wav_path, segment_wavs, texts, pauses,
         )
-        unreliable = [i + 1 for i, s in enumerate(scores) if s < 0]
+        # 失败判据与CalibrateWorker 统一走 is_matched，不再各自判断
+        unreliable = [i + 1 for i in range(len(scores))
+                       if not is_matched(new_starts[i], scores[i])]
         if len(unreliable) == len(entries):
             # 全部未匹配：说明音频里根本不含这些配音分段（常见原因是加载了
             # 视频原声/其他人声）。此时能量分割回退只会产出看似合理的垃圾，
@@ -124,7 +143,7 @@ class DubCalibrateWorker(QThread):
             )
 
         if self._canceled:
-            self.result_ready.emit([])
+            self._emit_canceled()
             return
 
         # 5. 重新映射时间戳（结果为修改后音频中的绝对时间）

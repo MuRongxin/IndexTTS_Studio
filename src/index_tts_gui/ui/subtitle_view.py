@@ -77,6 +77,10 @@ class SubtitlePanel(QWidget):
         self._undo_max = 50
         self._regen_worker: "SubtitleRegenerateWorker | None" = None
         self._calibrate_worker: "CalibrateWorker | None" = None
+        # 校准选中的修改后音频路径（GUI 线程自己保存，不去读 worker 的私有属性）
+        self._calibrate_wav_path: str = ""
+        # 一次编辑会话（选中某条字幕后连续敲字）只在第一次按键时压撤销栈
+        self._text_dirty = False
 
         # 音频
         self._player = QMediaPlayer()
@@ -378,15 +382,18 @@ class SubtitlePanel(QWidget):
         self._btn_restore_original.clicked.connect(self._restore_original_subtitles)
 
         # 全局快捷键
+        # 必须用 WidgetWithChildrenShortcut：ApplicationShortcut 在
+        # QApplication::notify 里先于焦点控件匹配，会把空格和 Ctrl+Z
+        # 从字幕文本框里抢走（空格变成播放、Ctrl+Z 变成字幕撤销）。
         self._shortcut_play = QShortcut(
             QKeySequence(" "), self, self._toggle_play
         )
-        self._shortcut_play.setContext(Qt.ApplicationShortcut)
+        self._shortcut_play.setContext(Qt.WidgetWithChildrenShortcut)
 
         self._shortcut_undo = QShortcut(
             QKeySequence("Ctrl+Z"), self, self._undo
         )
-        self._shortcut_undo.setContext(Qt.ApplicationShortcut)
+        self._shortcut_undo.setContext(Qt.WidgetWithChildrenShortcut)
 
         # 时间轴
         self._timeline.playhead_moved.connect(self._on_timeline_playhead_moved)
@@ -436,17 +443,46 @@ class SubtitlePanel(QWidget):
         for saved in candidates:
             if not saved:
                 continue
-            try:
-                entries = [SubtitleEntry(**item) for item in saved]
-                self.load_entries(entries, auto_load_audio=False)
-                logger.info("已加载保存的字幕: %d 条", len(entries))
-                return
-            except Exception as e:
-                logger.warning("加载保存的字幕失败: %s", e)
-        # 保存的数据均不可用，清空以允许后台重建兜底
-        self._project.subtitles_original = []
-        self._project.subtitles = []
+            entries = []
+            dropped = 0
+            for raw in saved:
+                entry = self._entry_from_saved(raw)
+                if entry is None:
+                    dropped += 1
+                    continue
+                entries.append(entry)
+            if dropped:
+                logger.warning("加载保存的字幕时跳过 %d 条无法解析的条目", dropped)
+            if not entries:
+                continue
+            self.load_entries(entries, auto_load_audio=False)
+            logger.info("已加载保存的字幕: %d 条", len(entries))
+            return
+        # 保存的数据均不可用：绝不清空 project 上的原始时间戳，
+        # 只尝试后台重建兜底（它本身会在已有数据时跳过）。
         self._try_auto_load_subtitles()
+
+    @staticmethod
+    def _entry_from_saved(raw) -> Optional[SubtitleEntry]:
+        """宽容解析一条保存的字幕数据，解析失败返回 None（只丢弃该条）。
+
+        直接 SubtitleEntry(**item) 遇到字段缺失/多余/类型漂移（版本升级或
+        手改过 project.json）会整批抛 TypeError，进而整份时间戳被清空。
+        """
+        if not isinstance(raw, dict):
+            return None
+        try:
+            index = int(raw.get("index", 0))
+            start_sec = float(raw.get("start_sec", 0.0))
+            end_sec = float(raw.get("end_sec", 0.0))
+        except (TypeError, ValueError):
+            return None
+        text = raw.get("text", "")
+        if not isinstance(text, str):
+            text = str(text)
+        return SubtitleEntry(
+            index=index, start_sec=start_sec, end_sec=end_sec, text=text
+        )
 
     def _save_subtitles_to_project(self):
         """将当前字幕保存到 project.json。
@@ -483,25 +519,47 @@ class SubtitlePanel(QWidget):
             self._smooth_timer.stop()
         except Exception:
             pass
-        for worker in (
-            self._regen_worker,
-            self._calibrate_worker,
-            self._audio_load_worker,
-        ):
+        for attr in ("_regen_worker", "_calibrate_worker", "_audio_load_worker"):
+            worker = getattr(self, attr, None)
             if worker is None:
                 continue
+            self._retire_worker(worker)
+            # 必须清空引用：worker 已经被 deleteLater，留下的是悬空 C++ 对象
+            setattr(self, attr, None)
+
+    def _retire_worker(self, worker) -> None:
+        """安全回收后台线程：先请求取消，再等待退出，最后才延迟删除。
+
+        对运行中的 QThread 直接 deleteLater() 会让 Qt 打印
+        "QThread: Destroyed while thread is still running"，并在
+        soundfile/librosa/ffmpeg 内部硬杀线程。所有站点都走这里，
+        保证退出顺序一致。
+        """
+        if worker is None:
+            return
+        try:
+            worker.disconnect()
+        except Exception:
+            pass
+        cancel = getattr(worker, "cancel", None)
+        if callable(cancel):
             try:
-                worker.disconnect()
-            except Exception:
-                pass
-            cancel = getattr(worker, "cancel", None)
-            if callable(cancel):
                 cancel()
+            except RuntimeError:
+                return
+        try:
             if worker.isRunning():
                 worker.wait(2000)
             if worker.isRunning():
                 worker.terminate()
                 worker.wait(1000)
+        except RuntimeError:
+            # 底层 C++ 对象已被销毁，无从等待
+            return
+        try:
+            worker.deleteLater()
+        except RuntimeError:
+            pass
 
     def _try_auto_load_subtitles(self):
         """打开工程后后台自动从已有 WAV 重建字幕（仅无保存字幕时的兜底）。
@@ -539,22 +597,10 @@ class SubtitlePanel(QWidget):
         self._audio_path = path
         self._player.setSource(QUrl.fromLocalFile(path))
 
-        # 停止并清理旧 worker：断开信号后 deleteLater，立即清空引用，
-        # 避免访问已经被 C++ 删除的内部对象。
+        # 停止并清理旧 worker：必须取消并等它真正退出后再删除，
+        # 否则会销毁仍在读音频文件的线程。
         if self._audio_load_worker is not None:
-            try:
-                self._audio_load_worker.loaded.disconnect()
-            except Exception:
-                pass
-            try:
-                self._audio_load_worker.failed.disconnect()
-            except Exception:
-                pass
-            try:
-                self._audio_load_worker.finished.disconnect()
-            except Exception:
-                pass
-            self._audio_load_worker.deleteLater()
+            self._retire_worker(self._audio_load_worker)
             self._audio_load_worker = None
 
         # 先清空旧波形，UI 进入加载状态
@@ -827,24 +873,8 @@ class SubtitlePanel(QWidget):
 
     def _cleanup_calibrate_worker(self):
         if self._calibrate_worker is not None:
-            try:
-                self._calibrate_worker.result_ready.disconnect()
-            except Exception:
-                pass
-            try:
-                self._calibrate_worker.error.disconnect()
-            except Exception:
-                pass
-            self._calibrate_worker.cancel()
-            # 对齐计算可能持续数分钟，必须等线程退出后再销毁，
-            # 否则延迟删除会销毁运行中的 QThread 导致崩溃
-            # （与 cancel_workers 的处理方式一致）
-            if self._calibrate_worker.isRunning():
-                self._calibrate_worker.wait(2000)
-            if self._calibrate_worker.isRunning():
-                self._calibrate_worker.terminate()
-                self._calibrate_worker.wait(1000)
-            self._calibrate_worker.deleteLater()
+            # 对齐计算可能持续数分钟，必须等线程退出后再销毁
+            self._retire_worker(self._calibrate_worker)
             self._calibrate_worker = None
         self._btn_calibrate.setText("🔄 校准字幕")
         # 取消路径不发 finished/error，按钮状态需在此显式刷新
@@ -939,8 +969,13 @@ class SubtitlePanel(QWidget):
         if target_row < 0:
             return
 
-        # 如果之前的字幕文本被编辑过，保存撤销点
-        self._maybe_push_text_undo()
+        # 换了选中项，本次编辑会话结束，下一次按键重新压撤销栈
+        self._text_dirty = False
+
+        # 播放自动跟随也会走到这里：此时用户可能正在文本框里打字，
+        # 覆盖文本/强制滚动会吃掉输入，焦点在编辑器上时让位给用户。
+        if self._text_edit.hasFocus():
+            return
 
         self._block_signals = True
         try:
@@ -973,13 +1008,15 @@ class SubtitlePanel(QWidget):
                 continue
 
         if not indices:
-            self._maybe_push_text_undo()
+            # 选中被清空，本次编辑会话结束
+            self._text_dirty = False
             self._current_edit_index = -1
             self._timeline.clear_selection()
             self._update_button_states()
             return
 
-        self._maybe_push_text_undo()
+        # 换了选中项，本次编辑会话结束
+        self._text_dirty = False
         self._current_edit_index = max(indices)
         item = self._track.get_item(self._current_edit_index)
         if item is not None:
@@ -1083,17 +1120,6 @@ class SubtitlePanel(QWidget):
         self._update_button_states()
         self._save_subtitles_to_project()
 
-    def _maybe_push_text_undo(self):
-        """如果当前编辑的字幕文本已变更，保存撤销点。"""
-        if self._current_edit_index < 0:
-            return
-        item = self._track.get_item(self._current_edit_index)
-        if item is None:
-            return
-        editor_text = self._text_edit.toPlainText()
-        if editor_text != item.text:
-            self._push_undo()
-
     # ── 文本编辑 ──
 
     def _strip_trailing_punctuation(self):
@@ -1122,14 +1148,15 @@ class SubtitlePanel(QWidget):
         self._push_undo()
         PUNCT = '。！？，、；：.!,?;:'
         changed = 0
-        for i in range(self._track.count):
-            item = self._track.get_item(i)
-            if item is None:
-                continue
+        # 直接遍历 items：get_item() 按 1-based 的 item.index 匹配，
+        # range(count) 是 0..N-1，i=0 永远取不到、最后一条（index==count）
+        # 会被漏掉。
+        for item in self._track.items:
             text = item.text.rstrip()
             if text and text[-1] in PUNCT:
                 item.text = text.rstrip(PUNCT).rstrip()
                 changed += 1
+        logger.info("去除句尾标点：共修改 %d 条", changed)
         self.refresh_table()
         self._timeline.set_subtitle_track(self._track)
         if self._current_edit_index >= 0:
@@ -1149,6 +1176,11 @@ class SubtitlePanel(QWidget):
         item = self._track.get_item(self._current_edit_index)
         if item is None:
             return
+        # 一次编辑会话只在第一次按键时压撤销栈：后面每个字符都压会让
+        # Ctrl+Z 一次只退一个字符。
+        if not self._text_dirty:
+            self._push_undo()
+            self._text_dirty = True
         item.text = text
         for row in range(self._table.rowCount()):
             idx_item = self._table.item(row, 0)
@@ -1354,11 +1386,14 @@ class SubtitlePanel(QWidget):
         self._timeline.select_subtitle(self._current_edit_index)
         self.select_row(self._current_edit_index)
 
-    def _merge_selected(self):
-        """合并选中的多个字幕块（表格或时间轴选择均可）。"""
-        self._push_undo()
-        # 合并表格和时间轴的选择
-        indices = set()
+    def _current_selection_indices(self) -> set[int]:
+        """表格行与时间轴选择的并集（1-based 字幕序号）。
+
+        合并/删除都按并集执行，按钮的可用状态也必须按并集判断：
+        用 max() 会让"表格 1 条 + 时间轴残留 2 条"点亮按钮，
+        点下去却合并了 3 条（含用户没选的那条）。
+        """
+        indices: set[int] = set()
         for row in set(item.row() for item in self._table.selectedItems()):
             idx_item = self._table.item(row, 0)
             if idx_item:
@@ -1367,7 +1402,12 @@ class SubtitlePanel(QWidget):
                 except ValueError:
                     pass
         indices.update(self._timeline.get_selected_indices())
+        return indices
 
+    def _merge_selected(self):
+        """合并选中的多个字幕块（表格或时间轴选择均可）。"""
+        self._push_undo()
+        indices = self._current_selection_indices()
         if len(indices) < 2:
             return
 
@@ -1382,15 +1422,7 @@ class SubtitlePanel(QWidget):
 
     def _delete_selected(self):
         self._push_undo()
-        indices = set()
-        for row in set(item.row() for item in self._table.selectedItems()):
-            idx_item = self._table.item(row, 0)
-            if idx_item:
-                try:
-                    indices.add(int(idx_item.text()))
-                except ValueError:
-                    pass
-        indices.update(self._timeline.get_selected_indices())
+        indices = self._current_selection_indices()
         if not indices:
             return
         for idx in sorted(indices, reverse=True):
@@ -1410,9 +1442,8 @@ class SubtitlePanel(QWidget):
         self._btn_delete.setEnabled(has_selection)
         self._btn_offset.setEnabled(has_selection)
 
-        selected_count = len(set(item.row() for item in self._table.selectedItems()))
-        selected_count = max(selected_count, len(self._timeline.get_selected_indices()))
-        self._btn_merge.setEnabled(selected_count >= 2)
+        # 与 _merge_selected 用同一份并集，保证"按钮亮 ⇔ 真的能合并"
+        self._btn_merge.setEnabled(len(self._current_selection_indices()) >= 2)
         self._btn_export.setEnabled(self._track.count > 0)
         self._btn_export_ass.setEnabled(self._track.count > 0)
 
@@ -1441,21 +1472,15 @@ class SubtitlePanel(QWidget):
     ):
         """启动后台字幕生成线程（仅作为无保存字幕时的自动兜底）。"""
         if self._regen_worker is not None:
-            try:
-                self._regen_worker.result_ready.disconnect()
-            except Exception:
-                pass
-            try:
-                self._regen_worker.error.disconnect()
-            except Exception:
-                pass
-            self._regen_worker.deleteLater()
+            # 必须取消并等它退出：直接 deleteLater 会销毁运行中的线程
+            self._retire_worker(self._regen_worker)
+            self._regen_worker = None
 
         self._regen_worker = SubtitleRegenerateWorker(sentences, output_dir, pauses)
         # 记录启动时的工程，避免结果覆盖新工程
         self._regen_worker.setProperty("project_dir", self._project.project_dir if self._project else "")
         self._regen_worker.result_ready.connect(self._on_regen_finished)
-        self._regen_worker.error.connect(lambda msg: logger.warning("自动重建字幕失败: %s", msg))
+        self._regen_worker.error.connect(self._on_regen_error)
         self._regen_worker.result_ready.connect(self._regen_worker.deleteLater)
         self._regen_worker.start()
 
@@ -1465,11 +1490,21 @@ class SubtitlePanel(QWidget):
         if sender is not None:
             expected_dir = sender.property("project_dir") or ""
         current_dir = self._project.project_dir if self._project else ""
+        # worker 已经被 deleteLater，必须清空引用，否则后续
+        # cancel_workers 会在悬空的 C++ 对象上调 isRunning() 抛 RuntimeError
+        self._regen_worker = None
         if expected_dir and expected_dir != current_dir:
             # 工程已切换，丢弃旧结果
             return
+        if not entries:
+            # 重建没产出条目时不要回写，避免抹掉工程里已保存的时间戳
+            return
         self.load_entries(entries, auto_load_audio=False)
         self._save_subtitles_to_project()
+
+    def _on_regen_error(self, msg: str):
+        logger.warning("自动重建字幕失败: %s", msg)
+        self._regen_worker = None
 
     def _calibrate_subtitles(self):
         """加载修改间隔后的音频，自动重新校准字幕时间戳。"""
@@ -1482,6 +1517,9 @@ class SubtitlePanel(QWidget):
         )
         if not path:
             return
+        # GUI 线程自己记下路径：不去读 worker._modified_wav_path
+        # （那是另一个线程的状态，result_ready 之后再读属于跨线程访问）
+        self._calibrate_wav_path = path
 
         # 重复校准时使用原始字幕（首次校准前保存的）作为基准，
         # 避免 current_entries 在上一轮校准坐标系而 old_starts 在原始坐标系
@@ -1513,7 +1551,7 @@ class SubtitlePanel(QWidget):
 
     def _on_calibrate_finished(self, entries):
         """校准完成：保存原字幕到备份，加载新校准字幕。"""
-        modified_full_dub = self._calibrate_worker._modified_wav_path if self._calibrate_worker else ""
+        modified_full_dub = self._calibrate_wav_path
         self._calibrate_worker = None
         self._btn_calibrate.setText("🔄 校准字幕")
         self._update_button_states()

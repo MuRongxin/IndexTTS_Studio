@@ -40,9 +40,37 @@ HINT_REFINE_MARGIN = 12.0
 
 
 def _load_mono(wav_path: str, target_sr: int = TARGET_SR) -> np.ndarray:
-    """加载音频为 mono 并重采样到 target_sr。"""
+    """加载音频为 mono 并重采样到 target_sr。空文件返回空数组。"""
     y, _sr = librosa.load(wav_path, sr=target_sr, mono=True)
+    if len(y) == 0:
+        logger.warning("音频为空: %s", wav_path)
+        return np.zeros(0, dtype=np.float32)
     return y.astype(np.float32)
+
+
+def cumulative_starts(
+    durations: list[float],
+    pauses: list[float] | None = None,
+) -> list[float]:
+    """由各句时长与句后停顿累计出每句起始时间。
+
+    pauses 不足时用 0.0 补齐、多余部分忽略。UI 侧的配音/校准流程与本
+    模块的粗匹配共用同一套累计规则，避免三处实现各自漂移。
+    """
+    n = len(durations)
+    src = list(pauses) if pauses else []
+    pauses = src + [0.0] * max(0, n - len(src))
+    starts: list[float] = []
+    acc = 0.0
+    for i in range(n):
+        starts.append(acc)
+        acc += durations[i] + pauses[i]
+    return starts
+
+
+def is_matched(start: float, score: float) -> bool:
+    """该句是否得到有效匹配：位置有效且置信度达到阈值。"""
+    return start >= 0 and score >= CONFIDENCE_THRESHOLD
 
 
 def _cross_correlate_match(
@@ -70,7 +98,8 @@ def _cross_correlate_match(
     L = len(t)
     s = np.asarray(signal_segment, dtype=np.float64)
     N = len(s)
-    if L > N or L == 0 or nt < 1e-9:
+    # 空模板/空信号/全零（无方差）模板都会让后续归一化除零，直接判无匹配
+    if L == 0 or N == 0 or L > N or nt < 1e-9:
         return -1.0, 0.0
 
     num = scipy.signal.correlate(s, t.astype(np.float64), method="fft")[L - 1 : N]
@@ -172,10 +201,16 @@ def _energy_based_segment(
     """
     y, _sr = librosa.load(wav_path, sr=sr, mono=True)
     y = y.astype(np.float32)
+    if len(y) == 0:
+        logger.error("音频为空，无法做能量分割: %s", wav_path)
+        return []
 
     hop = int(sr * 0.010)
     frame = int(sr * 0.025)
     rms = librosa.feature.rms(y=y, frame_length=frame, hop_length=hop)[0]
+    if len(rms) == 0:
+        logger.error("音频过短，无法做能量分割: %s", wav_path)
+        return []
 
     max_rms = float(np.max(rms))
     if max_rms <= 0:
@@ -257,12 +292,7 @@ def align_sentences(
         return [], []
 
     original_durations = [get_wav_duration(p) for p in sentence_wavs]
-    pauses = list(original_pauses) + [0.0] * max(0, n - len(original_pauses))
-    old_starts: list[float] = []
-    acc = 0.0
-    for i in range(n):
-        old_starts.append(acc)
-        acc += original_durations[i] + pauses[i]
+    old_starts = cumulative_starts(original_durations, original_pauses)
 
     logger.info("加载修改后音频: %s", modified_wav_path)
     full_coarse = _load_mono(modified_wav_path, COARSE_SR)
@@ -276,8 +306,10 @@ def align_sentences(
     for i in range(n):
         tpl = _load_mono(sentence_wavs[i], COARSE_SR)
         templates_coarse.append(tpl)
-        if len(tpl) > len(full_coarse):
-            logger.warning("句子 %d 模板长于整段音频，标记为失败", i + 1)
+        if len(tpl) == 0 or len(tpl) > len(full_coarse):
+            logger.warning(
+                "句子 %d 模板为空或长于整段音频，标记为失败", i + 1
+            )
             continue
         st, cf = _cross_correlate_match(tpl, full_coarse, COARSE_SR, 0.0)
         coarse_starts[i] = st
@@ -288,8 +320,7 @@ def align_sentences(
     # 调整过后的音频本身就可能把句子移到任意位置（重排/增删停顿），
     # 用旧时间轴做偏差过滤会把正确匹配误判为假匹配。
     reliable = [
-        coarse_starts[i] >= 0 and coarse_conf[i] >= CONFIDENCE_THRESHOLD
-        for i in range(n)
+        is_matched(coarse_starts[i], coarse_conf[i]) for i in range(n)
     ]
 
     # 不做单调性（LIS）剔除：用户可能调整了语序，高置信度的非单调
@@ -315,7 +346,7 @@ def align_sentences(
         st, cf = _cross_correlate_match(
             tpl, seg, COARSE_SR, region_start, expected_start=expected
         )
-        if st >= 0 and cf >= CONFIDENCE_THRESHOLD:
+        if is_matched(st, cf):
             coarse_starts[i], coarse_conf[i] = st, cf
             reliable[i] = True
             logger.info("句子 %d 锚点区间内重匹配成功: %.2fs conf=%.2f", i + 1, st, cf)
@@ -351,6 +382,11 @@ def align_sentences(
         else:
             continue
         tpl = _load_mono(sentence_wavs[i], TARGET_SR)
+        if len(tpl) == 0:
+            # 空模板无法匹配，可靠句回落到粗匹配位置
+            if reliable[i]:
+                new_starts[i], scores[i] = coarse_starts[i], coarse_conf[i]
+            continue
         tpl_dur = len(tpl) / TARGET_SR
         w_start = max(0.0, center - margin)
         w_end = min(fine_duration, center + tpl_dur + margin)
@@ -359,7 +395,7 @@ def align_sentences(
             st, cf = _cross_correlate_match(
                 tpl, seg, TARGET_SR, w_start, expected_start=center
             )
-            if st >= 0 and cf >= CONFIDENCE_THRESHOLD:
+            if is_matched(st, cf):
                 new_starts[i], scores[i] = st, cf
                 continue
         # 精修/验证失败：可靠句保留粗匹配位置，提示句判为缺失
@@ -372,7 +408,7 @@ def align_sentences(
     # 其字幕条目会由 recalibrate_entries 丢弃，而不是插值到幽灵位置。
     missing = 0
     for i in range(n):
-        if scores[i] >= CONFIDENCE_THRESHOLD and new_starts[i] >= 0:
+        if is_matched(new_starts[i], scores[i]):
             continue
         new_starts[i] = -1.0
         scores[i] = -1.0

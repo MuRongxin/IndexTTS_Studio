@@ -318,8 +318,17 @@ class ManuscriptPanel(QWidget):
     def set_project(self, project: Project):
         """切换工程时刷新数据。"""
         # 取消运行中的拆分：结果里带有旧工程文稿，不得写入新工程
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.cancel()
+        if self._worker is not None:
+            # 先断开数据信号再取消：取消点之后仍会发射的 chunk 会被追加进
+            # 新工程的句子列表，仅靠 _on_split_finished 的工程校验拦不住
+            for signal_name in ("progress", "chunk_ready", "result_ready"):
+                try:
+                    getattr(self._worker, signal_name).disconnect()
+                except Exception:
+                    pass
+            # 生命周期清理挂在 QThread 内置 finished 上，保持连接
+            if self._worker.isRunning():
+                self._worker.cancel()
         # 切换期间临时断开保存型信号，避免加载旧数据时触发写入
         self._editor.blockSignals(True)
         self._table.blockSignals(True)
@@ -398,6 +407,8 @@ class ManuscriptPanel(QWidget):
 
     def _load_from_project(self):
         """启动时从工程加载文稿和拆分结果（空工程清空，不残留上一工程）。"""
+        # 切换/加载工程即视为上一次拆分作废，避免残留的取消标记影响新工程
+        self._split_canceled = False
         source = self._project.source_text
         sentences = self._project.sentences
         self._editor.setPlainText(source or "")
@@ -533,6 +544,11 @@ class ManuscriptPanel(QWidget):
     def _on_chunk_ready(self, sentences: list[str]):
         """单块拆分完成：把该块的句子追加到表格末尾（增量显示）。"""
         if not sentences:
+            return
+        # 工程已切换时丢弃旧文稿的增量结果（与 _on_split_finished 的校验一致）
+        sender = self.sender()
+        expected = sender.property("project_dir") if sender is not None else ""
+        if expected and expected != self._project.project_dir:
             return
         self._table.blockSignals(True)
         try:

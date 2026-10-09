@@ -10,11 +10,13 @@ from index_tts_gui.core.subtitle import SubtitleEntry
 
 def _seconds_to_ass_time(seconds: float) -> str:
     """秒 → ASS 时间格式 H:MM:SS.cc（厘秒）"""
-    seconds = max(0.0, seconds)
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    cents = int((seconds - int(seconds)) * 100)
+    # 先整体四舍五入到厘秒再分解：否则小数部分 ∈ [0.995, 1.0) 时
+    # 秒位的进位会被 % 60 丢弃（1.996s 会错成 0:00:01.99）
+    total_cs = round(max(0.0, seconds) * 100)
+    hours = total_cs // 360000
+    minutes = (total_cs % 360000) // 6000
+    secs = (total_cs % 6000) // 100
+    cents = total_cs % 100
     return f"{hours}:{minutes:02d}:{secs:02d}.{cents:02d}"
 
 

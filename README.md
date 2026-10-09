@@ -8,7 +8,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-162%20passed-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-193%20passed-brightgreen?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square)
 
 </div>
@@ -156,6 +156,7 @@ src/index_tts_gui/
 │   ├── merger.py                # 🔗 ffmpeg 音频合并 + WAV 文件名解析
 │   ├── subtitler.py             # 📝 字幕生成 + SRT 输出
 │   ├── subtitle.py              # 📋 字幕数据模型（Entry/Track/Item/Style）
+│   ├── paths.py             # 📍 数据根目录解析（配置/日志/工程落点）
 │   ├── pause_advisor.py         # 💭 LLM 停顿顾问（委托给 LLMService）
 │   ├── pause_rules.py           # 📏 标点停顿规则
 │   ├── speech_aligner.py        # 🎯 音频校准：FFT 互相关 + 时间映射
@@ -180,7 +181,10 @@ src/index_tts_gui/
     ├── audio_engine.py          # 🌊 音频波形提取
     ├── audio_load_worker.py     # 🔄 后台波形加载
     ├── log_status_bar.py        # 📊 底部日志状态栏（marquee）
-    └── log_viewer.py            # 📋 完整日志查看对话框
+    ├── log_viewer.py            # 📋 完整日志查看对话框
+    ├── subtitle_dub_panel.py    # 🎬 字幕配音面板（外部字幕 + 偏移拼接）
+    ├── subtitle_dub_worker.py   # 🔄 逐条合成 + 偏移拼接线程
+    └── dub_calibrate_worker.py  # 🔄 配音反向校准线程
 ```
 
 ---
@@ -188,25 +192,31 @@ src/index_tts_gui/
 ## 🧪 测试
 
 ```bash
-QT_QPA_PLATFORM=offscreen pytest tests/ -v
+pytest -v
 ```
 
-**162 个测试**覆盖：
+无头环境（CI / 服务器）无需额外变量：`tests/conftest.py` 会在 import PySide6
+之前设好 `QT_QPA_PLATFORM=offscreen` 并把 `src` 注入 `sys.path`。
+
+**193 个测试**覆盖：
 
 | 类别 | 数量 | 文件 |
 |---|---:|---|
 | 🧠 核心 | 8 | `test_core.py` |
-| ✂️ LLM 服务 | 19 | `test_llm_service.py` / `test_llm_split.py` |
+| ✂️ LLM 服务 | 19 | `test_llm_service.py` |
 | 🔗 合并 | 15 | `test_merger.py` |
-| 🎯 校准算法 | 31 | `test_speech_aligner.py` |
+| 🎯 校准算法 | 23 | `test_speech_aligner.py` |
 | 🔄 校准 Worker | 9 | `test_calibrate_worker.py` |
-| 📄 字幕 | 41 | `test_subtitle.py` / `test_subtitler.py` / `test_subtitle_panel.py` |
-| 💾 工程 | 15 | `test_project.py` / `test_project_extra.py` |
+| 📄 字幕 | 63 | `test_subtitle.py` 13 · `test_subtitler.py` 14 · `test_subtitle_panel.py` 12 · `test_io_subtitle.py` 13 · `test_dub_planner.py` 11 |
+| 💾 工程 | 15 | `test_project.py` 6 · `test_project_extra.py` 9 |
 | 🎨 ASS 导出 | 2 | `test_io_ass.py` |
-| 🎚️ 变速 | 7 | `test_audio_speed.py` |
-| 💭 停顿顾问 | - | `test_pause_advisor.py` |
-| ⚙️ Worker | 16 | `test_workers.py` |
+| ⚚️ 变速 | 7 | `test_audio_speed.py` |
+| 🌊 波形 | 8 | `test_audio_engine.py` |
+| ⚙️ Worker | 17 | `test_workers.py` |
 | ✏️ 编辑器 | 7 | `test_editor_table.py` |
+
+> 需要真实 LLM / TTS 端点的调试脚本放在 `tools/`（`manual_llm_split.py`、
+> `manual_pause_advisor.py`），不参与 `pytest` 收集。
 
 ---
 

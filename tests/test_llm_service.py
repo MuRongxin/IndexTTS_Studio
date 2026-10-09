@@ -156,11 +156,37 @@ def test_parse_split_output():
 
 # ── Boundary pause ──
 
-def test_advise_boundary_pause_format():
-    """验证边界停顿 prompt 格式正确。"""
-    svc = LLMService({})
-    prompt = f"前句：你好\n后句：世界"
-    assert "前句" in prompt or True  # 不调 LLM 只验证不崩溃
+def test_advise_boundary_pause_clamps_and_parses(monkeypatch):
+    """边界停顿：解析数值、钳制到 0~2.0、无法解析时回落 0.3。"""
+    svc = LLMService({"api_url": "u", "api_key": "k", "model": "m"})
+
+    captured = {}
+
+    class _FakeClient:
+        def chat_completion(self, **kwargs):
+            captured.update(kwargs)
+            return "  0.85  "
+
+    monkeypatch.setattr(svc, "_make_client", lambda: _FakeClient())
+    assert svc._advise_boundary_pause("前句", "后句") == 0.85
+    assert "前句" in captured["messages"][0]["content"]
+    assert "后句" in captured["messages"][0]["content"]
+
+    # 超出范围要被钳制
+    class _TooBig:
+        def chat_completion(self, **kwargs):
+            return "9.9"
+
+    monkeypatch.setattr(svc, "_make_client", lambda: _TooBig())
+    assert svc._advise_boundary_pause("a", "b") == 2.0
+
+    # 无法解析时回落默认值，而不是抛异常
+    class _Garbage:
+        def chat_completion(self, **kwargs):
+            return "无法判断"
+
+    monkeypatch.setattr(svc, "_make_client", lambda: _Garbage())
+    assert svc._advise_boundary_pause("a", "b") == 0.3
 
 
 # ── Preset 配置 ──

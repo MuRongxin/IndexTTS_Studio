@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+from datetime import datetime
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -16,7 +17,12 @@ from index_tts_gui.core.tts_client import (
     DEFAULT_API_URL,
     DEFAULT_TIMEOUT,
 )
-from index_tts_gui.core.project import Project, PROJECT_FILE
+from index_tts_gui.core.paths import app_root, data_dir
+from index_tts_gui.core.project import (
+    DEFAULT_PROJECT_NAME,
+    Project,
+    PROJECT_FILE,
+)
 from index_tts_gui.ui.editor import ManuscriptPanel
 from index_tts_gui.ui.synthesis_panel import SynthesisPanel
 from index_tts_gui.ui.subtitle_view import SubtitlePanel
@@ -27,6 +33,27 @@ from index_tts_gui.ui.log_status_bar import LogStatusBar, QtLogHandler
 CONFIG_FILE = "config.json"
 
 logger = logging.getLogger("index_tts")
+
+
+def _config_path() -> str:
+    """config.json 绝对路径（跟随 app_root，不受启动工作目录影响）。"""
+    return os.path.join(app_root(), CONFIG_FILE)
+
+
+def _deep_merge(defaults: dict, loaded: dict) -> dict:
+    """递归合并配置：默认值在前，已保存值覆盖。
+
+    只做顶层覆盖时，旧的 config.json 会把整个 "llm" 子字典替换掉，
+    新增键（reasoning_effort / deepseek_key 等）的默认值就丢了。
+    """
+    merged = dict(defaults)
+    for key, value in loaded.items():
+        cur = merged.get(key)
+        if isinstance(cur, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(cur, value)
+        else:
+            merged[key] = value
+    return merged
 
 
 class MainWindow(QMainWindow):
@@ -73,24 +100,35 @@ class MainWindow(QMainWindow):
             },
         }
         self._config = defaults
-        if os.path.exists(CONFIG_FILE):
+        config_path = _config_path()
+        if os.path.exists(config_path):
             try:
-                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                with open(config_path, "r", encoding="utf-8") as f:
                     loaded = json.load(f)
-                    for k in defaults:
-                        if k in loaded:
-                            self._config[k] = loaded[k]
-                    if isinstance(self._config["timeout"], dict):
-                        self._config["timeout"] = {
-                            **dict(DEFAULT_TIMEOUT),
-                            **self._config["timeout"],
-                        }
-                    self._validate_llm_config()
+                if not isinstance(loaded, dict):
+                    raise ValueError(f"配置根节点应为对象，实际为 {type(loaded).__name__}")
+                self._config = _deep_merge(defaults, loaded)
+                if isinstance(self._config["timeout"], dict):
+                    self._config["timeout"] = {
+                        **dict(DEFAULT_TIMEOUT),
+                        **self._config["timeout"],
+                    }
+                self._validate_llm_config()
             except Exception:
-                pass
+                # 配置损坏时仍要能启动：退回内置默认值并留下线索
+                logger.warning(
+                    "读取配置失败 %s，已退回默认配置", config_path, exc_info=True
+                )
+                self._config = defaults
 
     def _load_last_project(self) -> Project:
-        """加载上一次使用的工程；不存在或无效时回退到默认工程。"""
+        """加载上一次使用的工程；不存在或无效时回退到默认工程。
+
+        Project.create_default 在 project.json 损坏时会抛 RuntimeError 以保护
+        原始数据。若让它冒泡出 MainWindow.__init__，用户只会看到一个启动即崩的
+        应用、没有任何说明、也没有自救入口 —— 这里降级到另一个目录的新工程，
+        并明确告知损坏文件未被改动。
+        """
         last_dir = self._config.get("last_project_dir", "")
         if last_dir and os.path.isdir(last_dir):
             loaded = Project.load(last_dir)
@@ -98,7 +136,25 @@ class MainWindow(QMainWindow):
                 logger.info("加载上次工程: %s", last_dir)
                 return loaded
             logger.warning("上次工程加载失败，回退默认工程: %s", last_dir)
-        return Project.create_default(os.getcwd())
+        try:
+            return Project.create_default(data_dir())
+        except RuntimeError as ex:
+            logger.error("默认工程不可用: %s", ex)
+            QMessageBox.warning(
+                self,
+                "工程文件损坏",
+                f"{ex}\n\n"
+                "已为你新建一个空工程，损坏的文件未被改动。\n"
+                "请手动检查修复上述文件后再切回该工程。",
+            )
+            fallback = os.path.join(
+                data_dir(), "projects",
+                f"{DEFAULT_PROJECT_NAME}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            )
+            project = Project(project_dir=fallback, name=os.path.basename(fallback))
+            project.ensure_dirs()
+            project.save()
+            return project
 
     def _save_last_project_dir(self):
         """将当前工程目录保存到配置。"""
@@ -127,11 +183,13 @@ class MainWindow(QMainWindow):
                 llm["model"] = default
 
     def _save_config(self):
+        path = _config_path()
         try:
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 json.dump(self._config, f, indent=2, ensure_ascii=False)
         except Exception:
-            pass
+            # 配置写不进去（只读磁盘/权限）时应用仍要能用，但要留下线索
+            logger.warning("保存配置失败: %s", path, exc_info=True)
 
     def _save_window_state(self):
         geo = self.saveGeometry().toBase64().data().decode("ascii")
@@ -143,16 +201,17 @@ class MainWindow(QMainWindow):
     def _restore_window_state(self):
         geo = self._config.get("window_geometry", "")
         state = self._config.get("window_state", "")
+        # 窗口状态损坏只影响窗口尺寸位置，不该阻止启动，但要有日志
         if geo:
             try:
                 self.restoreGeometry(QByteArray.fromBase64(geo.encode("ascii")))
             except Exception:
-                pass
+                logger.warning("恢复窗口位置失败，已忽略", exc_info=True)
         if state:
             try:
                 self.restoreState(QByteArray.fromBase64(state.encode("ascii")))
             except Exception:
-                pass
+                logger.warning("恢复窗口布局失败，已忽略", exc_info=True)
 
     # ── API Client ──
 
@@ -185,10 +244,12 @@ class MainWindow(QMainWindow):
         self.status_bar = LogStatusBar()
         self.setStatusBar(self.status_bar)
 
-        # 将日志转发到底部状态栏
+        # 将日志转发到底部状态栏。handler 重复添加会让每条日志被打印 N 次
+        # （MainWindow 被重建时，例如测试里反复实例化）。
         self._qt_log_handler = QtLogHandler(self)
         self._qt_log_handler.log_record.connect(self.status_bar.show_log_message)
-        logger.addHandler(self._qt_log_handler)
+        if self._qt_log_handler not in logger.handlers:
+            logger.addHandler(self._qt_log_handler)
 
     def _setup_central(self):
         root = QWidget()
@@ -446,7 +507,13 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"字幕已生成并加载: {len(entries)} 条")
 
     def closeEvent(self, event):
-        # 先取消各面板的后台任务，避免退出时 QThread 运行中被销毁而 abort
+        # 先摘掉日志转发：下面要阻塞等待后台线程，期间不该再往已销毁的
+        # 状态栏发信号，且重复实例化时避免 handler 叠加
+        handler = getattr(self, "_qt_log_handler", None)
+        if handler is not None:
+            logger.removeHandler(handler)
+
+        # 再取消各面板的后台任务，避免退出时 QThread 运行中被销毁而 abort
         for panel_name in ("manuscript_panel", "synthesis_panel", "subtitle_panel", "dub_panel"):
             panel = getattr(self, panel_name, None)
             cancel = getattr(panel, "cancel_workers", None) if panel else None

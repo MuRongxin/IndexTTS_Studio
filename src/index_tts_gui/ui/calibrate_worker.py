@@ -5,7 +5,12 @@ import os
 from PySide6.QtCore import QThread, Signal
 
 from index_tts_gui.core.merger import collect_sentence_wavs, get_wav_duration
-from index_tts_gui.core.speech_aligner import align_sentences, recalibrate_entries
+from index_tts_gui.core.speech_aligner import (
+    align_sentences,
+    cumulative_starts,
+    is_matched,
+    recalibrate_entries,
+)
 from index_tts_gui.core.subtitle import SubtitleEntry
 
 
@@ -20,6 +25,7 @@ class CalibrateWorker(QThread):
     # 任务结果信号。不能叫 finished：那会遮蔽 QThread 内置的线程退出信号
     result_ready = Signal(list)
     error = Signal(str)
+    canceled = Signal()
 
     def __init__(
         self,
@@ -35,10 +41,15 @@ class CalibrateWorker(QThread):
         self._output_dir = output_dir
         self._original_pauses = original_pauses
         self._current_entries = current_entries
-        self._canceled = False
 
     def cancel(self):
-        self._canceled = True
+        """请求取消。用 Qt 的 interruption 机制。"""
+        self.requestInterruption()
+
+    @property
+    def _canceled(self) -> bool:
+        """是否已请求取消（保留旧属性名，兼容既有调用与测试）。"""
+        return self.isInterruptionRequested()
 
     def run(self):
         try:
@@ -61,16 +72,12 @@ class CalibrateWorker(QThread):
         self.log.emit(f"已找到 {len(sentence_wavs)} 个分句音频")
 
         if self._canceled:
+            self.canceled.emit()
             return
 
         self.progress.emit(2, 3, "正在对齐音频…")
-        pauses = (
-            self._original_pauses
-            if self._original_pauses
-            else [0.0] * len(self._sentences)
-        )
-        if len(pauses) < len(self._sentences):
-            pauses = list(pauses) + [0.0] * (len(self._sentences) - len(pauses))
+        # pauses 的补齐规则统一交给 cumulative_starts，避免三处实现各自漂移
+        pauses = list(self._original_pauses) if self._original_pauses else []
 
         new_starts, scores = align_sentences(
             self._modified_wav_path,
@@ -78,15 +85,17 @@ class CalibrateWorker(QThread):
             self._sentences,
             pauses,
         )
-        # 全部未定位（new_starts 全为 -1）→ 音频不含任何分句，直接报错
-        missing = [i + 1 for i, ns in enumerate(new_starts) if ns < 0]
+        # 全部未定位 → 音频不含任何分句，直接报错
+        missing = [i + 1 for i in range(len(new_starts))
+                   if not is_matched(new_starts[i], scores[i])]
         if missing and len(missing) == len(self._sentences):
             raise RuntimeError(
                 "未能在该音频中匹配到任何分句音频。\n"
                 "请确认加载的是【调整间隔后的配音音频】"
                 "（full_dub.wav 或其编辑版本），而非视频原声或其他人声文件。"
             )
-        unreliable = [i + 1 for i, s in enumerate(scores) if s < 0]
+        unreliable = [i + 1 for i in range(len(scores))
+                       if not is_matched(new_starts[i], scores[i])]
         if unreliable:
             shown = ", ".join(map(str, unreliable[:10]))
             more = "…" if len(unreliable) > 10 else ""
@@ -98,18 +107,13 @@ class CalibrateWorker(QThread):
             )
 
         if self._canceled:
+            self.canceled.emit()
             return
 
         self.progress.emit(3, 3, "正在重新映射字幕时间戳…")
 
         original_durations = [get_wav_duration(p) for p in sentence_wavs]
-        old_cumulative = 0.0
-        old_starts = []
-        for i in range(len(self._sentences)):
-            old_starts.append(old_cumulative)
-            old_cumulative += original_durations[i]
-            if i < len(pauses):
-                old_cumulative += pauses[i]
+        old_starts = cumulative_starts(original_durations, pauses)
 
         new_entries, dropped = recalibrate_entries(
             self._current_entries,

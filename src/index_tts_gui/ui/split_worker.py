@@ -17,11 +17,13 @@ class _SplitCanceled(Exception):
 class SplitWorker(QThread):
     """后台执行文本拆分。"""
 
-    started = Signal()
+    # 不能叫 started：那会遮蔽 QThread 内置的线程启动信号
+    run_started = Signal()
     progress = Signal(int, int, str)  # current, total, message
     chunk_ready = Signal(list)         # 单块拆分完成，sentences: list[str]（用于增量显示）
     # 任务结果信号。不能叫 finished：那会遮蔽 QThread 内置的线程退出信号
     result_ready = Signal(list, bool, str)
+    canceled = Signal()                # 用户取消：所有取消返回路径统一发射
     # sentences: list[str], used_llm: bool, message: str
 
     def __init__(
@@ -64,10 +66,11 @@ class SplitWorker(QThread):
         self.chunk_ready.emit(sentences)
 
     def run(self):
-        self.started.emit()
+        self.run_started.emit()
         mode = self._mode.lower().strip()
         try:
             if self._canceled:
+                self.canceled.emit()
                 return
             if mode == "rule":
                 sentences = RuleBasedSplitter(self._max_length).split(self._text)
@@ -83,34 +86,28 @@ class SplitWorker(QThread):
                 self.result_ready.emit(sentences, False, "LLM 未配置，已回退规则拆分")
                 return
 
-            try:
-                sentences = service.split_text(
-                    self._text, self._max_length,
-                    on_progress=self._on_chunk_progress,
-                    on_chunk_result=self._on_chunk_result,
-                )
-                if self._canceled:
-                    return
-                self.result_ready.emit(sentences, True, self._split_message(service))
-            except LLMServiceError as e:
-                if mode == "llm":
-                    raise
-                # auto 模式回退
-                sentences = RuleBasedSplitter(self._max_length).split(self._text)
-                self.result_ready.emit(sentences, False, f"LLM 失败({e})，已回退规则拆分")
+            sentences = service.split_text(
+                self._text, self._max_length,
+                on_progress=self._on_chunk_progress,
+                on_chunk_result=self._on_chunk_result,
+            )
+            if self._canceled:
+                self.canceled.emit()
+                return
+            self.result_ready.emit(sentences, True, self._split_message(service))
 
         except _SplitCanceled:
+            self.canceled.emit()
             return
         except LLMServiceError as e:
+            # LLM 失败只有这一条回退路径（不再在内部 try 里重复处理），
+            # 同一故障不会出现两种提示文案
             logger.exception("LLM 拆分失败")
-            if mode in ("llm", "auto"):
-                try:
-                    sentences = RuleBasedSplitter(self._max_length).split(self._text)
-                    self.result_ready.emit(sentences, False, f"LLM 拆分失败({e})，已回退规则拆分")
-                except Exception as e2:
-                    self.result_ready.emit([], False, f"拆分失败: {e}; 规则回退也失败: {e2}")
-            else:
-                self.result_ready.emit([], False, f"拆分失败: {e}")
+            try:
+                sentences = RuleBasedSplitter(self._max_length).split(self._text)
+                self.result_ready.emit(sentences, False, f"LLM 拆分失败({e})，已回退规则拆分")
+            except Exception as e2:
+                self.result_ready.emit([], False, f"拆分失败: {e}; 规则回退也失败: {e2}")
         except Exception as e:
             logger.exception("拆分异常")
             self.result_ready.emit([], False, f"拆分失败: {e}")

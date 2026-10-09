@@ -641,6 +641,8 @@ class TimelineCanvas(QWidget):
         if event.button() != Qt.LeftButton:
             return
 
+        # 只在真正点击时取焦点：若在 enterEvent 里抢焦点，鼠标划过画布就会
+        # 把焦点从字幕编辑框/表格抢走，导致误触发 Delete/Backspace 删除字幕
         self.setFocus()
         x = int(event.position().x())
         y = int(event.position().y())
@@ -815,7 +817,11 @@ class TimelineCanvas(QWidget):
                 self.playhead_time = click_time
                 self.playhead_moved.emit(click_time)
                 self.update()
-            elif self.drag_mode in ("move_subtitle", "resize_left", "resize_right"):
+            elif self._has_dragged and self.drag_mode in (
+                "move_subtitle",
+                "resize_left",
+                "resize_right",
+            ):
                 if self.drag_subtitle_index >= 0:
                     if self.drag_mode == "move_subtitle":
                         new_start = self.drag_original_start + self.drag_delta_time
@@ -911,10 +917,6 @@ class TimelineCanvas(QWidget):
         else:
             super().keyPressEvent(event)
 
-    def enterEvent(self, event):
-        self.setFocus()
-        super().enterEvent(event)
-
     def leaveEvent(self, event):
         self._razor_preview_pos = None
         self._razor_preview_text = ("", "")
@@ -970,17 +972,13 @@ class TimelineCanvas(QWidget):
         super().resizeEvent(event)
 
     def delete_selected_subtitle(self) -> list[int]:
-        """删除所有选中的字幕，返回被删除的 index 列表。"""
-        deleted = []
-        if not self.subtitle_track:
-            return deleted
-        # 从大到小删除，避免索引变化
-        for idx in sorted(self.selected_indices, reverse=True):
-            try:
-                self.subtitle_track.remove_item(idx)
-                deleted.append(idx)
-            except (IndexError, ValueError):
-                pass
+        """清空选中状态并返回待删除的 index 列表（降序）。
+
+        这里只负责收集索引、不执行删除：真正的删除由 subtitle_deleted
+        信号的处理方完成，否则画布与面板会对同一个 SubtitleTrack 重复
+        删除，第一次删除后索引重排会导致第二次删掉相邻的字幕。
+        """
+        deleted = sorted(self.selected_indices, reverse=True)
         self.selected_index = -1
         self.selected_indices.clear()
         self.update()

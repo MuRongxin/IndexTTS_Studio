@@ -1,4 +1,6 @@
 """日志查看器对话框。"""
+import os
+
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPlainTextEdit,
     QPushButton, QLabel, QFileDialog, QMessageBox,
@@ -10,6 +12,11 @@ from index_tts_gui.core.logger import LOG_FILE
 
 class LogViewerDialog(QDialog):
     """查看应用日志文件。"""
+
+    # 日志轮转会保留 4×2MB，全量读入并 setPlainText 会长时间卡住界面，
+    # 这里只展示末尾内容（先按字节回溯，再按行数截断）
+    _MAX_BYTES = 512 * 1024
+    _MAX_LINES = 2000
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -60,10 +67,33 @@ class LogViewerDialog(QDialog):
         bottom.addWidget(btn_close)
         layout.addLayout(bottom)
 
+    def _read_log_tail(self) -> tuple[str, bool]:
+        """从文件尾回溯读取末尾日志，返回 (内容, 是否被截断)。"""
+        with open(LOG_FILE, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            chunk = min(size, self._MAX_BYTES)
+            f.seek(size - chunk, os.SEEK_SET)
+            data = f.read(chunk)
+
+        lines = data.decode("utf-8", errors="replace").splitlines()
+        truncated = chunk < size
+        if truncated and lines:
+            # 命中字节上限时首行多半是被切断的半行
+            lines = lines[1:]
+        if len(lines) > self._MAX_LINES:
+            lines = lines[-self._MAX_LINES:]
+            truncated = True
+        return "\n".join(lines), truncated
+
     def _load_log(self):
         try:
-            with open(LOG_FILE, "r", encoding="utf-8") as f:
-                content = f.read()
+            content, truncated = self._read_log_tail()
+            if truncated:
+                content = (
+                    f"（日志过长，仅显示末尾部分，完整内容见 {LOG_FILE}）\n"
+                    + content
+                )
             self._text.setPlainText(content)
             # 滚动到底部
             self._text.verticalScrollBar().setValue(

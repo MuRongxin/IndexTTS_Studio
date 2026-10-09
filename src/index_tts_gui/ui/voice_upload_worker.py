@@ -12,7 +12,8 @@ logger = logging.getLogger("index_tts")
 class VoiceUploadWorker(QThread):
     """后台上传参考音频到 TTS API。"""
 
-    started = Signal()
+    # 不能叫 started：那会遮蔽 QThread 内置的线程启动信号
+    run_started = Signal()
     success = Signal(str)   # audio_name
     error = Signal(str)     # error message
     # 任务结果信号。不能叫 finished：那会遮蔽 QThread 内置的线程退出信号
@@ -31,7 +32,7 @@ class VoiceUploadWorker(QThread):
         self._audio_name = audio_name
 
     def run(self):
-        self.started.emit()
+        self.run_started.emit()
         try:
             logger.info("开始上传参考音频: %s", self._audio_name)
             result = self._client.upload_audio(self._audio_path)

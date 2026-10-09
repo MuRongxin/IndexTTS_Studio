@@ -52,9 +52,38 @@ def _get_audio_info(wav_path: str) -> tuple[int, int]:
     return int(stream["sample_rate"]), int(stream["channels"])
 
 
-def _generate_silence(duration: float, ref_path: str, output_path: str):
-    """生成与参考音频同格式的静音 WAV。"""
-    sample_rate, channels = _get_audio_info(ref_path)
+def _probe_common_format(wav_paths: list[str]) -> tuple[int, int, bool]:
+    """探测所有输入的采样率/声道数。
+
+    返回 (基准采样率, 基准声道数, 是否全部一致)，基准取第一个片段。
+    全部一致时可直接 concat 流拷贝；不一致必须重编码统一格式，
+    否则输出会在中途改变采样率，ffprobe 的 format=duration 不可靠
+    （下游所有字幕时间戳都依赖它）。
+    """
+    base_rate, base_channels = _get_audio_info(wav_paths[0])
+    uniform = True
+    for path in wav_paths[1:]:
+        rate, channels = _get_audio_info(path)
+        if rate != base_rate or channels != base_channels:
+            uniform = False
+            break
+    return base_rate, base_channels, uniform
+
+
+def _generate_silence(
+    duration: float,
+    ref_path: str,
+    output_path: str,
+    sample_rate: int | None = None,
+    channels: int | None = None,
+):
+    """生成静音 WAV。
+
+    默认沿用 ref_path 的采样率/声道；显式给出 sample_rate/channels 时
+    按该参数生成，用于混合采样率场景下让所有静音保持同一格式。
+    """
+    if sample_rate is None or channels is None:
+        sample_rate, channels = _get_audio_info(ref_path)
     layout = "mono" if channels == 1 else "stereo"
     subprocess.run(
         [
@@ -70,21 +99,35 @@ def _generate_silence(duration: float, ref_path: str, output_path: str):
     )
 
 
-def merge_wavs(wav_paths: list[str], output_path: str):
+def merge_wavs(
+    wav_paths: list[str],
+    output_path: str,
+    force_format: tuple[int, int] | None = None,
+):
     """
     用 ffmpeg concat 合并多个 WAV 文件。
 
     Args:
         wav_paths: WAV 文件路径列表（按顺序）
         output_path: 输出文件路径
+        force_format: (采样率, 声道数)。为 None 时直接流拷贝（默认，
+            要求各输入格式一致）；给出时改为重编码到该统一格式，
+            用于输入采样率/声道数不一致的场景
     """
     if not wav_paths:
         raise ValueError("没有可合并的音频文件")
 
     logger.info(
-        "合并音频: files=%d output=%s first=%s",
-        len(wav_paths), output_path, wav_paths[0]
+        "合并音频: files=%d output=%s first=%s force_format=%s",
+        len(wav_paths), output_path, wav_paths[0], force_format
     )
+    if force_format is None:
+        codec_args = ["-c", "copy"]
+    else:
+        sample_rate, channels = force_format
+        codec_args = [
+            "-c:a", "pcm_s16le", "-ar", str(sample_rate), "-ac", str(channels),
+        ]
 
     fd, list_path = tempfile.mkstemp(suffix=".txt", prefix="concat_")
     try:
@@ -98,7 +141,7 @@ def merge_wavs(wav_paths: list[str], output_path: str):
         subprocess.run(
             [
                 "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                "-i", list_path, "-c", "copy", output_path,
+                "-i", list_path, *codec_args, output_path,
             ],
             check=True, capture_output=True, timeout=300.0,
         )
@@ -141,15 +184,19 @@ def merge_wavs_with_custom_pauses(
     pauses: list[float],
     output_path: str,
     on_progress: "callable | None" = None,
+    leading: bool = False,
 ):
     """
     合并 WAV 片段，使用自定义停顿时长。
 
     Args:
         wav_paths: WAV 文件路径列表
-        pauses: 每段之后的停顿时长列表，长度应与 wav_paths 相同
+        pauses: 停顿时长列表，长度应与 wav_paths 相同；默认表示每段
+                **之后**的停顿，leading=True 时表示每段**之前**的停顿
         output_path: 输出文件路径
         on_progress: 进度回调 (current, total, message)，逐段生成静音时触发
+        leading: 为 True 时把停顿插在对应片段之前（配音按时间轴顺延
+                 的场景需要先补静音再放音频）
     """
     if not wav_paths:
         raise ValueError("没有可合并的音频文件")
@@ -161,25 +208,43 @@ def merge_wavs_with_custom_pauses(
     logger.info("自定义停顿合并: files=%d pauses=%s", len(wav_paths), pauses)
 
     total = len(wav_paths)
+    # 所有静音统一按第一个片段的采样率/声道生成；输入格式不一致时
+    # 最终 concat 走重编码，避免输出中途改变采样率
+    base_rate, base_channels, uniform = _probe_common_format(wav_paths)
+    if not uniform:
+        logger.warning("输入音频格式不一致，合并时重编码到 %dHz/%d 声道",
+                       base_rate, base_channels)
+    force_format = None if uniform else (base_rate, base_channels)
+
     with tempfile.TemporaryDirectory(prefix="tts_merge_") as tmpdir:
         concat_items: list[str] = []
         for i, path in enumerate(wav_paths):
             if on_progress:
                 on_progress(i + 1, total, f"合并片段 {i + 1}/{total}")
-            concat_items.append(path)
             pause = pauses[i] if i < len(pauses) else 0.0
+            silence_path = None
             if pause > 0:
                 silence_path = os.path.join(tmpdir, f"silence_{i:04d}.wav")
                 logger.debug("生成静音: index=%d duration=%.2f", i, pause)
                 try:
-                    _generate_silence(pause, path, silence_path)
-                    concat_items.append(silence_path)
+                    _generate_silence(
+                        pause, path, silence_path,
+                        sample_rate=base_rate, channels=base_channels,
+                    )
                 except subprocess.CalledProcessError as e:
                     err = e.stderr.decode("utf-8", errors="replace")[:500]
                     logger.error("生成静音失败: index=%d error=%s", i, err)
                     raise RuntimeError(f"生成第 {i} 段静音失败: {err}") from e
 
-        merge_wavs(concat_items, output_path)
+            if leading and silence_path is not None:
+                concat_items.append(silence_path)
+            concat_items.append(path)
+            if not leading and silence_path is not None:
+                concat_items.append(silence_path)
+
+        if on_progress:
+            on_progress(total, total, f"拼接 {len(concat_items)} 段音频")
+        merge_wavs(concat_items, output_path, force_format=force_format)
 
 
 def sanitize_for_filename(text: str, max_len: int = 20) -> str:

@@ -315,6 +315,8 @@ class SubtitleDubPanel(QWidget):
         self._upload_worker.success.connect(self._on_upload_success)
         self._upload_worker.error.connect(self._on_upload_error)
         self._upload_worker.result_ready.connect(self._on_upload_finished)
+        # 生命周期挂 finished：run() 抛异常时 result_ready 不会发
+        self._upload_worker.finished.connect(self._on_upload_finished)
         self._upload_worker.start()
         self._refresh_start_button()
 
@@ -328,9 +330,13 @@ class SubtitleDubPanel(QWidget):
         self._log_msg(f"✗ 音色上传失败: {msg}")
 
     def _on_upload_finished(self):
-        if self._upload_worker is not None:
-            self._upload_worker.deleteLater()
-            self._upload_worker = None
+        worker = self._upload_worker
+        self._upload_worker = None
+        if worker is not None:
+            try:
+                worker.deleteLater()
+            except RuntimeError:
+                pass
         self._refresh_start_button()
 
     def _preview_temp_voice(self):
@@ -427,8 +433,9 @@ class SubtitleDubPanel(QWidget):
         self._calibrate_worker.log.connect(self._log_msg)
         self._calibrate_worker.progress.connect(self._on_calibrate_progress)
         self._calibrate_worker.error.connect(self._on_calibrate_error)
+        self._calibrate_worker.canceled.connect(self._on_calibrate_canceled)
         self._calibrate_worker.result_ready.connect(self._on_calibrate_finished)
-        self._calibrate_worker.result_ready.connect(
+        self._calibrate_worker.finished.connect(
             self._on_calibrate_lifetime_finished
         )
         self._log_msg(f"🔄 开始校准: {os.path.basename(path)}")
@@ -444,13 +451,18 @@ class SubtitleDubPanel(QWidget):
         if not entries:
             self._status_label.setText("校准失败，无输出（详见日志）")
             return
+        prev_count = len(self._entries)
 
-        # 表格切到校准后时间轴显示
-        if len(entries) == self._table.rowCount():
-            for row, e in enumerate(entries):
-                self._table.item(row, 1).setText(seconds_to_time_str(e.start_sec))
-                self._table.item(row, 2).setText(seconds_to_time_str(e.end_sec))
-            self._table_gb.setTitle("字幕预览（校准后）")
+        # 必须无条件把校准结果写回面板状态。
+        # 丢行是校准的正常结果（对应片段已不在音频里），原先只在
+        # "条数恰好相等"时才刷新表格，于是界面仍显示校准前的时间戳、
+        # 却宣布"校准完成"，而且之后再点"开始配音"会用旧条目重配。
+        self._entries = list(entries)
+        self._populate_table()
+        self._table_gb.setTitle("字幕预览（校准后）")
+        dropped = prev_count - len(self._entries)
+        if dropped > 0:
+            self._log_msg(f"  ⚠ {dropped} 条字幕因对应片段已不在音频中被移除")
 
         dub_dir = os.path.join(self._project.output_dir, "dub")
         outputs = [
@@ -468,11 +480,20 @@ class SubtitleDubPanel(QWidget):
         self._status_label.setText("校准失败")
         self._log_msg(f"✗ {msg}")
 
+    def _on_calibrate_canceled(self):
+        """用户主动取消校准：按钮状态必须恢复，否则校准永久置灰。"""
+        self._log_msg("已取消校准")
+        self._status_label.setText("已取消")
+
     def _on_calibrate_lifetime_finished(self):
         """校准 worker 生命周期结束，安全清理引用。"""
-        if self._calibrate_worker is not None:
-            self._calibrate_worker.deleteLater()
-            self._calibrate_worker = None
+        worker = self._calibrate_worker
+        self._calibrate_worker = None
+        if worker is not None:
+            try:
+                worker.deleteLater()
+            except RuntimeError:
+                pass
         self._refresh_calibrate_button()
 
     # ── 开始 / 取消 ──
@@ -513,8 +534,11 @@ class SubtitleDubPanel(QWidget):
         self._worker.sentence_done.connect(self._on_sentence_done)
         self._worker.log.connect(self._log_msg)
         self._worker.error.connect(self._on_error)
+        self._worker.canceled.connect(self._on_dub_canceled)
         self._worker.result_ready.connect(self._on_finished)
-        self._worker.result_ready.connect(self._on_worker_lifetime_finished)
+        # 生命周期挂 finished：run() 抛异常时 result_ready 不会发，
+        # 挂在它上面会让"开始配音"永久禁用
+        self._worker.finished.connect(self._on_worker_lifetime_finished)
         self._worker.start()
 
     def _stop(self):
@@ -522,6 +546,8 @@ class SubtitleDubPanel(QWidget):
             self._was_canceled = True
             self._worker.cancel()
             self._log_msg("正在取消…")
+            # 立即禁用：否则用户无法区分"取消没生效"和"正在收尾"
+            self._btn_stop.setEnabled(False)
 
     def _on_progress(self, current: int, total: int, text: str):
         self._progress.setMaximum(total)
@@ -536,8 +562,19 @@ class SubtitleDubPanel(QWidget):
                 item.setText("✓")
                 item.setForeground(QBrush(QColor("#2e7d32")))
 
+    def _on_dub_canceled(self):
+        """用户主动取消：与"配音失败"区分开，并立即恢复按钮。"""
+        self._was_canceled = True
+        self._log_msg("已取消配音")
+        self._status_label.setText("已取消")
+        self._btn_stop.setEnabled(False)
+        self._btn_start.setEnabled(True)
+
     def _on_error(self, msg: str):
         self._status_label.setText("配音失败")
+        # msg 必须落日志：之前直接丢弃，用户只看到"配音失败"，
+        # 失败原因在界面上完全不可见
+        self._log_msg(f"✗ {msg}")
 
     def _on_finished(self, outputs: list):
         self._btn_stop.setEnabled(False)
@@ -569,9 +606,13 @@ class SubtitleDubPanel(QWidget):
 
     def _on_worker_lifetime_finished(self):
         """worker 生命周期结束，安全清理引用，不访问其成员。"""
-        if self._worker is not None:
-            self._worker.deleteLater()
-            self._worker = None
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            try:
+                worker.deleteLater()
+            except RuntimeError:
+                pass
         self._refresh_start_button()
         self._refresh_calibrate_button()
 
@@ -628,8 +669,19 @@ class SubtitleDubPanel(QWidget):
         self._refresh_calibrate_button()
 
     def _disconnect_upload_worker(self, worker):
+        """断开 worker 全部信号。
+
+        原先逐个列举 ("success","error","finished")，但面板实际连的是
+        result_ready —— 它根本没被断开。跨线程信号是 queued metacall，
+        旧 worker 已返回而调用仍在主线程排队时，它会打到新 worker 上。
+        全断即可，不再手工维护信号列表。
+        """
         if worker is None:
             return
+        try:
+            worker.disconnect()
+        except (RuntimeError, TypeError):
+            pass
         for sig in ("success", "error", "finished"):
             try:
                 getattr(worker, sig).disconnect()

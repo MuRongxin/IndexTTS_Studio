@@ -14,11 +14,9 @@ from index_tts_gui.core.project import Project
 
 
 @pytest.fixture(scope="session")
-def app():
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(sys.argv)
-    yield app
+def app(qapp):
+    """复用 conftest 的唯一 QApplication，避免多份fixture 竞争实例。"""
+    yield qapp
 
 
 @pytest.fixture

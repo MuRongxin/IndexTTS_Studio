@@ -2,8 +2,6 @@
 import glob
 import logging
 import os
-import time
-from datetime import datetime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QProgressBar, QPlainTextEdit, QLabel, QFileDialog,
@@ -11,84 +9,15 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal
 
-from PySide6.QtCore import QThread, Signal
-
 from index_tts_gui.core.tts_client import BaseTTSClient, create_client_from_config
 from index_tts_gui.core.project import Project
-from index_tts_gui.core.merger import collect_sentence_wavs, sanitize_for_filename, parse_sentence_wav_name
+from index_tts_gui.core.merger import collect_sentence_wavs, parse_sentence_wav_name
 from index_tts_gui.ui.merge_worker import MergeWorker
-from index_tts_gui.ui.synthesis_worker import RETRY_DELAYS, SynthesisWorker
+from index_tts_gui.ui.synthesis_worker import SynthesisWorker
 from index_tts_gui.ui.voice_panel import VoicePanel
 
 
 logger = logging.getLogger("index_tts")
-
-
-class SingleSynthesisWorker(QThread):
-    """后台重新合成单句，通过信号与 UI 通信。"""
-
-    success = Signal(int, str)  # 0-based index, wav_path
-    error = Signal(int, str)    # 0-based index, msg
-    log = Signal(str)
-
-    def __init__(
-        self,
-        index: int,
-        sentence: str,
-        audio_name: str,
-        output_dir: str,
-        client: BaseTTSClient,
-    ):
-        super().__init__()
-        self._index = index
-        self._sentence = sentence
-        self._audio_name = audio_name
-        self._output_dir = output_dir
-        self._client = client
-
-    def run(self):
-        try:
-            text_part = sanitize_for_filename(self._sentence)
-            wav_path = os.path.join(
-                self._output_dir, f"sentence_{self._index + 1:02d}_{text_part}.wav"
-            )
-            self.log.emit(
-                f"🔄 开始重新合成第 {self._index + 1} 句 → {os.path.basename(wav_path)}"
-            )
-            # 写新 WAV 前删除同序号的旧文件，避免改文本后残留旧文件导致合并数量不一致
-            for old_path in glob.glob(
-                os.path.join(self._output_dir, f"sentence_{self._index + 1:02d}_*.wav")
-            ):
-                if old_path == wav_path:
-                    continue
-                try:
-                    os.remove(old_path)
-                except Exception:
-                    pass
-            audio_bytes = None
-            last_error = ""
-            for attempt in range(len(RETRY_DELAYS) + 1):
-                try:
-                    audio_bytes = self._client.synthesize(self._sentence, self._audio_name)
-                    break
-                except Exception as e:
-                    last_error = str(e)
-                    if attempt < len(RETRY_DELAYS):
-                        delay = RETRY_DELAYS[attempt]
-                        self.log.emit(
-                            f"  ⚠ 第 {self._index + 1} 句第 {attempt + 1} 次失败，"
-                            f"{delay:.0f}s 后重试: {e}"
-                        )
-                        time.sleep(delay)
-            if audio_bytes is None:
-                raise RuntimeError(last_error)
-            with open(wav_path, "wb") as f:
-                f.write(audio_bytes)
-            self.success.emit(self._index, wav_path)
-        except Exception as e:
-            logger.exception("重新合成单句失败: index=%d", self._index)
-            self.error.emit(self._index, str(e))
-            self.log.emit(f"✗ 重新合成第 {self._index + 1} 句失败: {e}")
 
 
 class SynthesisPanel(QWidget):
@@ -109,7 +38,7 @@ class SynthesisPanel(QWidget):
         self._client = client
         self._worker: SynthesisWorker | None = None
         self._merge_worker: MergeWorker | None = None
-        self._single_worker: SingleSynthesisWorker | None = None
+        self._single_worker: SynthesisWorker | None = None
         self._sentences: list[str] = []
         self._audio_name: str = project.audio_name
         self._output_dir: str = project.output_dir
@@ -418,8 +347,7 @@ class SynthesisPanel(QWidget):
         self._log.clear()
 
         if self._worker is not None:
-            self._disconnect_worker(self._worker)
-            self._worker.deleteLater()
+            self._retire_worker(self._worker)
             self._worker = None
 
         self._worker = SynthesisWorker(
@@ -433,7 +361,10 @@ class SynthesisPanel(QWidget):
         self._worker.log.connect(self._log_msg)
         self._worker.error.connect(self._log_msg)
         self._worker.result_ready.connect(self._on_finished)
-        self._worker.result_ready.connect(self._on_worker_lifetime_finished)
+        # 生命周期清理必须挂 finished：run() 里任何未捕获异常都会跳过
+        # result_ready，挂在 result_ready 上会让 worker 永远不被释放
+        # （开始按钮永久禁用且不报错）
+        self._worker.finished.connect(self._on_worker_lifetime_finished)
         self._worker.start()
 
     def _stop(self):
@@ -442,29 +373,27 @@ class SynthesisPanel(QWidget):
             self._worker.cancel()
             self._log_msg("正在停止…")
 
-    def _disconnect_worker(self, worker):
-        """断开 worker 的所有信号，避免旧回调命中新工程状态。"""
+    def _retire_worker(self, worker) -> None:
+        """统一退役一个 worker：断开全部信号，生命周期交给 finished。
+
+        原先逐个信号 disconnect 的写法漏掉了 finished，而单句 worker 恰恰
+        连着 finished —— 旧 worker 的 finished 在换新 worker 之后送达时，
+        会把新 worker deleteLater 掉。这里用 disconnect() 全断，并且只保留
+        一条 finished -> deleteLater，避免手工列举信号列表再次漂移。
+        """
         if worker is None:
             return
         try:
-            worker.progress.disconnect()
-        except Exception:
+            worker.finished.disconnect()
+        except (RuntimeError, TypeError):
             pass
         try:
-            worker.sentence_done.disconnect()
-        except Exception:
+            worker.disconnect()
+        except (RuntimeError, TypeError):
             pass
         try:
-            worker.log.disconnect()
-        except Exception:
-            pass
-        try:
-            worker.error.disconnect()
-        except Exception:
-            pass
-        try:
-            worker.result_ready.disconnect()
-        except Exception:
+            worker.finished.connect(worker.deleteLater)
+        except (RuntimeError, TypeError):
             pass
 
     def _on_progress(self, current, total, text):
@@ -478,10 +407,18 @@ class SynthesisPanel(QWidget):
         self._voice_panel.update_segment(index, filename)
 
     def _on_worker_lifetime_finished(self):
-        """合成 worker 生命周期结束，安全清理引用。"""
-        if self._worker is not None:
-            self._worker.deleteLater()
-            self._worker = None
+        """合成 worker 生命周期结束，安全清理引用。
+
+        幂等：finished 可能与 _retire_worker 的 finished->deleteLater
+        同时触发，先取后置空，避免重复 deleteLater 抛 RuntimeError。
+        """
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            try:
+                worker.deleteLater()
+            except RuntimeError:
+                pass
 
     def _on_finished(self, wav_map=None):
         self._btn_start.setEnabled(True)
@@ -595,7 +532,12 @@ class SynthesisPanel(QWidget):
         self._log_msg(f"⚠ 未找到第 {idx+1} 句的音频文件")
 
     def _regenerate_single(self, index: int):
-        """重新合成单句（后台线程）。"""
+        """重新合成单句（后台线程）。
+
+        单句重生成复用 SynthesisWorker(indices=[index])：原先的
+        SingleSynthesisWorker 是它的一份漂移副本（无取消、无重试日志、
+        无 wav_map 失败记账），任何修复都只能落到其中一份上。
+        """
         if self._client is None:
             self._log_msg("⚠ 未配置 TTS API，请在左侧「设置」中填写 API URL")
             return
@@ -606,83 +548,38 @@ class SynthesisPanel(QWidget):
             return
 
         if self._single_worker is not None:
-            self._disconnect_worker(self._single_worker)
-            self._single_worker.deleteLater()
+            self._retire_worker(self._single_worker)
             self._single_worker = None
 
         self._btn_regen_single.setEnabled(False)
-        self._single_worker = SingleSynthesisWorker(
-            index=index,
-            sentence=self._sentences[index],
-            audio_name=self._audio_name,
-            output_dir=self._output_dir,
-            client=self._client,
+        self._single_worker = SynthesisWorker(
+            self._sentences, self._audio_name,
+            self._output_dir, self._client,
+            indices=[index],
         )
         self._single_worker.setProperty("project_dir", self._project.project_dir)
         self._single_worker.log.connect(self._log_msg)
-        self._single_worker.success.connect(self._on_single_synth_success)
-        self._single_worker.error.connect(self._on_single_synth_error)
+        self._single_worker.error.connect(self._log_msg)
+        # result_ready 复用批量完成的收尾逻辑：重生成一句后要重新
+        # 评估整工程的合成状态（失败/缺失统计、wav_map 落盘）
+        self._single_worker.result_ready.connect(self._on_finished)
         self._single_worker.finished.connect(self._on_single_worker_finished)
         self._single_worker.start()
 
-    def _on_single_synth_success(self, index: int, wav_path: str):
-        # 工程已切换时丢弃旧结果
-        sender = self.sender()
-        expected = sender.property("project_dir") if sender is not None else ""
-        if expected and expected != self._project.project_dir:
-            logger.warning("工程已切换，丢弃旧单句合成结果")
-            return
-        # 更新 WAV 映射，只保留当前 sentences 范围内的条目
-        valid_indices = set(range(len(self._sentences)))
-        existing = {
-            e["index"]: e
-            for e in self._project.wav_map
-            if e["index"] in valid_indices
-        }
-        existing[index] = {
-            "index": index,
-            "text": self._sentences[index],
-            "wav": os.path.basename(wav_path),
-            "status": "ok",
-            "batch": datetime.now().isoformat(timespec="seconds"),
-        }
-        self._project.wav_map = list(existing.values())
-        self._project.save()
-        self._log_msg(f"✅ 第 {index + 1} 句重新合成完成: {os.path.basename(wav_path)}")
-        self._refresh_segment_list()
-        self._refresh_merge_button()
-
-    def _on_single_synth_error(self, index: int, msg: str):
-        # 工程已切换时不写旧结果
-        sender = self.sender()
-        expected = sender.property("project_dir") if sender is not None else ""
-        if expected and expected != self._project.project_dir:
-            return
-        self._log_msg(f"✗ 重新合成第 {index+1} 句失败: {msg}")
-        # 显式标记失败，覆盖旧条目：旧 take 不得继续被计为成功
-        if 0 <= index < len(self._sentences):
-            valid_indices = set(range(len(self._sentences)))
-            existing = {
-                e["index"]: e
-                for e in self._project.wav_map
-                if e["index"] in valid_indices
-            }
-            existing[index] = {
-                "index": index,
-                "text": self._sentences[index],
-                "wav": "",
-                "status": "failed",
-                "batch": datetime.now().isoformat(timespec="seconds"),
-                "error": msg,
-            }
-            self._project.wav_map = list(existing.values())
-            self._project.save()
-
     def _on_single_worker_finished(self):
-        """单句合成 worker 生命周期结束，安全清理引用。"""
-        if self._single_worker is not None:
-            self._single_worker.deleteLater()
-            self._single_worker = None
+        """单句合成 worker 生命周期结束，安全清理引用。
+
+        挂在 QThread.finished 上（而不是 result_ready）：result_ready 在
+        run() 内 emit，跨线程 queued 调用可能在本对象已经被换掉之后才送达，
+        那时 deleteLater() 删掉的是新 worker。
+        """
+        worker = self._single_worker
+        self._single_worker = None
+        if worker is not None:
+            try:
+                worker.deleteLater()
+            except RuntimeError:
+                pass
         self._btn_regen_single.setEnabled(True)
 
     def _log_msg(self, msg: str):

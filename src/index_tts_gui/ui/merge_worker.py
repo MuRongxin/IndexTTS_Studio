@@ -102,7 +102,7 @@ class MergeWorker(QThread):
         merge_wavs_with_custom_pauses(
             wavs, self.pauses, output_path,
             on_progress=lambda c, t, m: self.progress.emit(
-                60 + int(35 * c / t), 100, m
+                60 + int(35 * c / max(t, 1)), 100, m
             ),
         )
         self.log.emit(f"✓ 已生成完整音频: {output_path}")

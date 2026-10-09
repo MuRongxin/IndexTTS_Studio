@@ -32,6 +32,8 @@ class AudioEngine:
         self.waveform: Optional[np.ndarray] = None  # shape=(n_samples, n_channels)
         self.peak_data: Optional[np.ndarray] = None  # shape=(n_bars, 2)
         self._cache_key: Optional[tuple] = None
+        # 单声道混音缓存：extract_waveform 每次调用只需切片，不必重算全曲
+        self._mono: Optional[np.ndarray] = None  # shape=(n_samples,)
 
     def load_audio(self, filepath: str) -> bool:
         """加载音频文件。支持直接从视频文件提取。"""
@@ -122,6 +124,16 @@ class AudioEngine:
     def is_loaded(self) -> bool:
         return self.waveform is not None and self.waveform.size > 0
 
+    def _mono_mix(self) -> np.ndarray:
+        """返回单声道混音（多通道按通道平均），结果缓存直到音频被替换。"""
+        if self._mono is None:
+            w = self.waveform
+            if w.shape[1] > 1:
+                self._mono = w.mean(axis=1)
+            else:
+                self._mono = w[:, 0]
+        return self._mono
+
     def extract_waveform(
         self, num_bars: int = 2000, start: float = 0.0, end: float = 0.0
     ) -> np.ndarray:
@@ -144,15 +156,13 @@ class AudioEngine:
         if self._cache_key == key and self.peak_data is not None:
             return self.peak_data
 
-        if self.waveform.shape[1] > 1:
-            mono = self.waveform.mean(axis=1)
-        else:
-            mono = self.waveform[:, 0]
-
+        mono = self._mono_mix()
         s0 = int(start * self.sample_rate)
         s1 = min(mono.shape[0], max(s0 + 1, int(end * self.sample_rate)))
         seg = mono[s0:s1]
-
+        if seg.size == 0:
+            # start 被夹到 duration 时区间为空，返回静音条而不是触发除零
+            return np.zeros((num_bars, 2), dtype=np.float32)
         num_bars = min(num_bars, seg.shape[0])
         counts = np.full(num_bars, seg.shape[0] // num_bars, dtype=np.int64)
         counts[: seg.shape[0] % num_bars] += 1
@@ -170,6 +180,7 @@ class AudioEngine:
         """使峰值缓存失效（音频数据被替换后调用）。"""
         self.peak_data = None
         self._cache_key = None
+        self._mono = None
 
     def clear(self) -> None:
         self.sample_rate = 0
@@ -178,6 +189,7 @@ class AudioEngine:
         self.waveform = None
         self.peak_data = None
         self._cache_key = None
+        self._mono = None
 
     def __del__(self):
         self.clear()

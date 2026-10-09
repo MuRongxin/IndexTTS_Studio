@@ -198,7 +198,8 @@ def test_energy_based_segment_finds_n_segments(tmp_path):
 
     starts = _energy_based_segment(str(path), num_expected=4, sr=16000)
     # 至少 4 个段被识别（可能受阈值影响，但 4 个 sine 段都能找到）
-    assert len(starts) >= 3  # 允许阈值造成轻微段合并
+    # 期望 4 段：段数不足说明合并逻辑把可分内容并掉了
+    assert len(starts) == 4
     # 段起点应单调递增
     for i in range(1, len(starts)):
         assert starts[i] > starts[i - 1]
@@ -272,7 +273,7 @@ def test_align_sentences_basic_no_change(tmp_path):
     full = tmp_path / "full.wav"
     _build_modified_with_pauses(sentence_wavs, pauses, full)
 
-    new_starts = align_sentences(
+    new_starts, scores = align_sentences(
         str(full), sentence_wavs,
         ["句1", "句2", "句3"], pauses,
     )
@@ -301,7 +302,7 @@ def test_align_sentences_extended_pauses(tmp_path):
     full = tmp_path / "full.wav"
     _build_modified_with_pauses(sentence_wavs, pauses, full)
 
-    new_starts = align_sentences(
+    new_starts, scores = align_sentences(
         str(full), sentence_wavs, ["句1", "句2"], pauses,
     )
     assert len(new_starts) == 2
@@ -316,7 +317,7 @@ def test_align_sentences_empty_input(tmp_path):
     full = tmp_path / "full.wav"
     _write_silence_wav(full, 0.5, sr=8000)
 
-    new_starts = align_sentences(str(full), [], [], [])
+    new_starts, scores = align_sentences(str(full), [], [], [])
     assert new_starts == []
 
 
@@ -334,7 +335,7 @@ def test_align_sentences_short_window_falls_back(tmp_path):
 
     pauses = [0.0]
     # 不应崩溃
-    new_starts = align_sentences(
+    new_starts, scores = align_sentences(
         str(full), sentence_wavs, ["句1"], pauses,
     )
     assert len(new_starts) == 1
@@ -342,9 +343,9 @@ def test_align_sentences_short_window_falls_back(tmp_path):
     assert new_starts[0] <= 0.0
 
 
-def test_align_sentences_mismatched_count_raises(tmp_path):
+def test_align_sentences_mismatched_count_does_not_crash(tmp_path):
     """句子数与 wav 数不匹配时由 CalibrateWorker 检查，
-    align_sentences 本身不做这层校验（依赖调用方）。"""
+    align_sentences 本身不做这层校验（依赖调用方），但也不能崩。"""
     from index_tts_gui.core.speech_aligner import align_sentences
 
     s1 = tmp_path / "s1.wav"
@@ -353,11 +354,12 @@ def test_align_sentences_mismatched_count_raises(tmp_path):
     _write_sin_wav(full, 1.0, sr=8000, freq=440)
 
     # sentence_wavs 1 个但 sentences 2 个
-    new_starts = align_sentences(
+    new_starts, scores = align_sentences(
         str(full), [str(s1)], ["句1", "句2"], [0.0],
     )
-    # 不抛异常（实际行为）— 取决于实现
-    assert isinstance(new_starts, list)
+    # 按 wav 数返回，不多不少
+    assert len(new_starts) == 1
+    assert len(scores) == 1
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -487,7 +489,7 @@ def test_full_pipeline_align_then_recalibrate(tmp_path):
     full = tmp_path / "full.wav"
     _build_modified_with_pauses(sentence_wavs, pauses, full)
 
-    new_starts = align_sentences(str(full), sentence_wavs, sentences, pauses)
+    new_starts, scores = align_sentences(str(full), sentence_wavs, sentences, pauses)
     assert len(new_starts) == 4
     # 句 1 起点应接近 0
     assert abs(new_starts[0] - 0.0) < 0.1
@@ -533,7 +535,7 @@ def test_full_pipeline_with_extended_pauses(tmp_path):
     full = tmp_path / "full.wav"
     _build_modified_with_pauses(sentence_wavs, [1.5, 1.5, 0.0], full)
 
-    new_starts = align_sentences(
+    new_starts, scores = align_sentences(
         str(full), sentence_wavs, ["a", "b", "c"], original_pauses,
     )
     assert len(new_starts) == 3
@@ -560,7 +562,7 @@ def test_full_pipeline_shortened_pauses(tmp_path):
     full = tmp_path / "full.wav"
     _build_modified_with_pauses(sentence_wavs, [0.1, 0.0], full)
 
-    new_starts = align_sentences(
+    new_starts, scores = align_sentences(
         str(full), sentence_wavs, ["a", "b"], [0.2, 0.0],
     )
     assert abs(new_starts[0] - 0.0) < 0.1

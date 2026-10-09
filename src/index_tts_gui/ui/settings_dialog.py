@@ -1,12 +1,13 @@
 """设置对话框：API 服务商、地址、超时。"""
-import re
+import logging
+
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QComboBox, QLineEdit, QSpinBox, QPushButton,
     QLabel, QDialogButtonBox, QGroupBox, QCheckBox,
     QTextEdit,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 
 from index_tts_gui.core.tts_client import (
     DEFAULT_API_URL,
@@ -22,6 +23,35 @@ from index_tts_gui.core.splitter import (
     DEFAULT_MAX_LENGTH,
 )
 from index_tts_gui.ui.log_viewer import LogViewerDialog
+
+
+logger = logging.getLogger("index_tts")
+
+
+class _ConnectionTestWorker(QThread):
+    """后台执行连接检测。
+
+    health_check / LLM test 都是网络调用，超时上限分别是 600s / 300s。
+    放在按钮槽里同步执行会冻结整个对话框，连"正在检测…"都画不出来，
+    也无法取消。这里统一放到线程里，结果用信号回传。
+    """
+
+    succeeded = Signal(str)   # 成功提示
+    failed = Signal(str)      # 失败原因
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+
+    def cancel(self):
+        self.requestInterruption()
+
+    def run(self):
+        try:
+            self.succeeded.emit(str(self._fn()))
+        except Exception as e:
+            logger.info("连接检测失败", exc_info=True)
+            self.failed.emit(str(e))
 
 
 # 思考强度选项按 LLM 预设适配：
@@ -57,6 +87,8 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("设置")
         self.setMinimumWidth(420)
         self._config = config
+        self._test_worker: _ConnectionTestWorker | None = None
+        self._test_result_label: QLabel | None = None
         self._setup_ui()
         self._load_config()
 
@@ -110,18 +142,18 @@ class SettingsDialog(QDialog):
         self._tts_test_result.setStyleSheet("color: #666; font-size: 12px;")
         self._tts_test_result.setWordWrap(True)
 
-        btn_test_tts = QPushButton("🧪 测试 TTS API 连接")
-        btn_test_tts.setStyleSheet("""
+        self._btn_test_tts = QPushButton("🧪 测试 TTS API 连接")
+        self._btn_test_tts.setStyleSheet("""
             QPushButton {
                 background: #4caf50; color: white;
                 padding: 6px 14px; border-radius: 4px;
             }
             QPushButton:hover { background: #388e3c; }
         """)
-        btn_test_tts.clicked.connect(self._test_tts_connection)
+        self._btn_test_tts.clicked.connect(self._test_tts_connection)
 
         tts_test_layout = QHBoxLayout()
-        tts_test_layout.addWidget(btn_test_tts)
+        tts_test_layout.addWidget(self._btn_test_tts)
         tts_test_layout.addWidget(self._tts_test_result, 1)
         form.addRow("检测:", tts_test_layout)
 
@@ -305,9 +337,50 @@ class SettingsDialog(QDialog):
         self._llm_prompt.setPlainText(DEFAULT_LLM_PROMPT)
         self._llm_punctuation_fallback.setChecked(False)
 
-    def _test_tts_connection(self):
-        from PySide6.QtWidgets import QMessageBox
+    def _run_connection_test(self, fn, label, result_label) -> None:
+        """在后台线程跑一次连接检测，结果写回 result_label。"""
+        if self._test_worker is not None and self._test_worker.isRunning():
+            result_label.setText("⚠ 已有检测在进行中")
+            result_label.setStyleSheet("color: #f57c00;")
+            return
+        if self._test_worker is not None:
+            self._test_worker.deleteLater()
+            self._test_worker = None
 
+        self._test_result_label = result_label
+        self._set_test_buttons_enabled(False)
+        result_label.setText(f"正在{label}…")
+        result_label.setStyleSheet("color: #f57c00;")
+
+        self._test_worker = _ConnectionTestWorker(fn, parent=self)
+        self._test_worker.succeeded.connect(self._on_test_succeeded)
+        self._test_worker.failed.connect(self._on_test_failed)
+        self._test_worker.finished.connect(self._on_test_worker_finished)
+        self._test_worker.start()
+
+    def _on_test_succeeded(self, msg: str) -> None:
+        if self._test_result_label is not None:
+            self._test_result_label.setText(f"✅ {msg}")
+            self._test_result_label.setStyleSheet("color: #4caf50;")
+
+    def _on_test_failed(self, msg: str) -> None:
+        if self._test_result_label is not None:
+            self._test_result_label.setText(f"❌ {msg}")
+            self._test_result_label.setStyleSheet("color: #d32f2f;")
+
+    def _on_test_worker_finished(self) -> None:
+        worker = self._test_worker
+        self._test_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self._test_result_label = None
+        self._set_test_buttons_enabled(True)
+
+    def _set_test_buttons_enabled(self, enabled: bool) -> None:
+        for btn in (self._btn_test_tts, self._btn_test_llm):
+            btn.setEnabled(enabled)
+
+    def _test_tts_connection(self):
         url = self._api_input.text().strip()
         provider = self._provider_combo.currentText().strip()
         timeout = {
@@ -320,24 +393,17 @@ class SettingsDialog(QDialog):
             self._tts_test_result.setStyleSheet("color: #d32f2f;")
             return
 
-        self._tts_test_result.setText("正在检测…")
-        self._tts_test_result.setStyleSheet("color: #f57c00;")
-
-        try:
+        def _check() -> str:
             client = create_client(
                 provider=provider,
                 api_url=url,
                 timeout=timeout,
             )
-            msg = client.health_check()
-            self._tts_test_result.setText(f"✅ {msg}")
-            self._tts_test_result.setStyleSheet("color: #4caf50;")
-        except Exception as e:
-            self._tts_test_result.setText(f"❌ {e}")
-            self._tts_test_result.setStyleSheet("color: #d32f2f;")
+            return client.health_check()
+
+        self._run_connection_test(_check, "检测", self._tts_test_result)
 
     def _test_llm_connection(self):
-        from PySide6.QtWidgets import QMessageBox
         from index_tts_gui.core.llm_service import LLMService
 
         url = self._llm_url.text().strip()
@@ -349,18 +415,11 @@ class SettingsDialog(QDialog):
             self._llm_test_result.setStyleSheet("color: #d32f2f;")
             return
 
-        self._llm_test_result.setText("正在测试…")
-        self._llm_test_result.setStyleSheet("color: #f57c00;")
-
-        try:
+        def _check() -> str:
             cfg = {"api_url": url, "api_key": key, "model": model, "preset": ""}
-            service = LLMService(cfg)
-            msg = service.test()
-            self._llm_test_result.setText(f"✅ {msg}")
-            self._llm_test_result.setStyleSheet("color: #4caf50;")
-        except Exception as e:
-            self._llm_test_result.setText(f"❌ {e}")
-            self._llm_test_result.setStyleSheet("color: #d32f2f;")
+            return LLMService(cfg).test()
+
+        self._run_connection_test(_check, "测试", self._llm_test_result)
 
     def _on_llm_preset_changed(self, index: int):
         preset = self._llm_preset.itemData(index)
@@ -384,10 +443,12 @@ class SettingsDialog(QDialog):
         cfg = LLM_PRESETS[preset]
         self._llm_url.setText(cfg["api_url"])
 
-        # 切换预设时，加载该预设保存的 API key
+        # 切换预设时，加载该预设保存的 API key。
+        # 必须保留旧版api_key 兜底：只有 legacy api_key 的旧配置在这里
+        # 被清空后，用户一保存就会把 key 彻底丢掉。
         llm = self._config.get("llm", {})
-        key = llm.get(f"{preset}_key", "")
-        self._llm_key.setText(key)
+        old_key = llm.get("api_key", "")
+        self._llm_key.setText(llm.get(f"{preset}_key", "") or old_key)
 
         self._llm_model.blockSignals(True)
         self._llm_model.clear()
@@ -446,6 +507,22 @@ class SettingsDialog(QDialog):
         # 把当前 key 写入对应预设字段
         self._config["llm"][f"{current_preset}_key"] = current_key
         self.accept()
+
+    def closeEvent(self, event):
+        # 关闭时若检测线程仍在跑，先取消并等待，避免 QThread 被销毁
+        worker = self._test_worker
+        if worker is not None:
+            try:
+                worker.cancel()
+                if worker.isRunning():
+                    worker.wait(2000)
+                if worker.isRunning():
+                    worker.terminate()
+                    worker.wait(1000)
+            except RuntimeError:
+                pass
+            self._test_worker = None
+        super().closeEvent(event)
 
     def get_config(self) -> dict:
         return self._config

@@ -49,13 +49,22 @@ class BaseSplitter(ABC):
         ...
 
 
+# 同一句子文本的保护表缓存：jieba 分词开销大，长句硬切会反复求解
+_WORD_CUT_CACHE: dict[str, dict[int, int]] = {}
+_WORD_CUT_CACHE_MAX = 512
+
+
 def word_cut_guard(text: str) -> dict[int, int]:
     """用 jieba 分词构建切点保护表：词内位置 → 词首位置。
 
     硬切兜底时若切点落在词语内部（英文单词/数字串/中文词），
     应回退到词首切分，避免把完整词语切到两句中。
-    jieba 不可用时返回空表，退回纯硬切行为。
+    结果按句子文本缓存，避免同一句反复分词；jieba 不可用时返回空表，
+    退回纯硬切行为。
     """
+    cached = _WORD_CUT_CACHE.get(text)
+    if cached is not None:
+        return cached
     try:
         import jieba
     except ImportError:
@@ -67,6 +76,10 @@ def word_cut_guard(text: str) -> dict[int, int]:
         for i in range(pos + 1, pos + len(word)):
             guard[i] = pos
         pos += len(word)
+    if len(_WORD_CUT_CACHE) >= _WORD_CUT_CACHE_MAX:
+        # 简单的先进先出淘汰，避免长文稿逐句切分时缓存无限增长
+        _WORD_CUT_CACHE.pop(next(iter(_WORD_CUT_CACHE)))
+    _WORD_CUT_CACHE[text] = guard
     return guard
 
 
@@ -83,7 +96,9 @@ class RuleBasedSplitter(BaseSplitter):
         self.max_length = max_length or 0
 
     def split(self, text: str) -> list[str]:
-        text = re.sub(r'\n+', '', text)
+        # 换行替换成空格而不是删除，否则段落边界会把前后词粘连
+        # （"你好\n世界" 会变成 "你好世界"）
+        text = re.sub(r'\n+', ' ', text)
         raw = re.split(r'(?<=[。！？])', text)
         raw = [s.strip() for s in raw if s.strip()]
 
@@ -151,20 +166,34 @@ class RuleBasedSplitter(BaseSplitter):
         return best
 
     def _find_pause_word_cut(self, text: str, around: int) -> int:
-        """在 around 附近找停顿词前的切分位置。"""
+        """在 around 附近找停顿词前的切分位置。
+
+        窗口内所有命中词都要比较：直接取 PAUSE_WORDS 中第一个命中的词
+        可能落在离切点很远的位置，切出来的两句会严重失衡。
+        取离 around 最近者，距离相同则取靠前的位置（切点更稳定）。
+        """
         window_start = max(0, around - 10)
         window_end = min(len(text), around + 10)
         window = text[window_start:window_end]
 
         best = -1
+        best_dist = -1
         for word in PAUSE_WORDS:
-            idx = window.find(word)
-            if idx != -1:
+            search_from = 0
+            while True:
+                idx = window.find(word, search_from)
+                if idx == -1:
+                    break
+                search_from = idx + 1
                 pos = window_start + idx
                 # 切到停顿词前面
-                if pos > 0 and pos > window_start:
-                    best = pos
-                    break
+                if pos <= 0 or pos <= window_start:
+                    continue
+                dist = abs(pos - around)
+                if best_dist < 0 or dist < best_dist or (
+                    dist == best_dist and pos < best
+                ):
+                    best, best_dist = pos, dist
         return best
 
 

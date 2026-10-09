@@ -16,6 +16,21 @@ logger = logging.getLogger("index_tts")
 #: 瞬时故障（网络抖动、服务短暂过载）由此吸收，避免单次失败即终判。
 RETRY_DELAYS = (1.0, 2.0)
 
+#: 退避轮询粒度（秒）。用 requestInterruption 打断退避，避免取消后
+#: 还要干等完整个RETRY_DELAYS 才有反应。
+_BACKOFF_SLICE = 0.1
+
+
+def _interruptible_sleep(thread: QThread, seconds: float) -> bool:
+    """可被取消打断的 sleep。返回 True 表示等待期间收到取消请求。"""
+    waited = 0.0
+    while waited < seconds:
+        if thread.isInterruptionRequested():
+            return True
+        time.sleep(min(_BACKOFF_SLICE, seconds - waited))
+        waited += _BACKOFF_SLICE
+    return bool(thread.isInterruptionRequested())
+
 
 class SynthesisWorker(QThread):
     """后台合成线程"""
@@ -41,13 +56,18 @@ class SynthesisWorker(QThread):
         self._output_dir = output_dir
         self._client = client
         self._indices = indices if indices is not None else list(range(len(sentences)))
-        self._canceled = False
         self._wav_map: list[dict] = []
 
         os.makedirs(self._output_dir, exist_ok=True)
 
     def cancel(self):
-        self._canceled = True
+        """请求取消。用Qt 的 interruption 机制，这样退避等待也能被打断。"""
+        self.requestInterruption()
+
+    @property
+    def _canceled(self) -> bool:
+        """是否已请求取消（保留旧属性名，兼容既有调用与测试）。"""
+        return self.isInterruptionRequested()
 
     def _remove_stale_takes(self, one_based: int, keep_path: str = ""):
         """删除指定序号的句子 WAV。
@@ -65,6 +85,21 @@ class SynthesisWorker(QThread):
                 pass
 
     def run(self):
+        """线程入口。
+
+        顶层 try 是必需的：异常一旦逃出run()，result_ready 就不会 emit，
+        面板那边"开始合成"会永久禁用、"停止"永久可用，且不显示任何错误。
+        这里保证任何异常都变成 error + result_ready，UI 一定能恢复。
+        """
+        try:
+            self._run_impl()
+        except Exception as e:
+            logger.exception("合成线程异常终止")
+            self.error.emit(f"合成线程异常终止: {e}")
+            self.log.emit(f"✗ 合成线程异常终止: {e}")
+            self.result_ready.emit(self._wav_map)
+
+    def _run_impl(self):
         total = len(self._indices)
         # 合成批次标识：写入 wav_map 条目，用于区分不同代际的 take
         batch = datetime.now().isoformat(timespec="seconds")
@@ -116,7 +151,10 @@ class SynthesisWorker(QThread):
                         self.log.emit(
                             f"  ⚠ 第 {i} 句第 {attempt + 1} 次失败，{delay:.0f}s 后重试: {e}"
                         )
-                        time.sleep(delay)
+                        # 退避期间也允许取消，否则取消要等最多 3s 才生效
+                        if _interruptible_sleep(self, delay):
+                            logger.info("退避等待中收到取消请求: 第 %d 句", i)
+                            break
                     else:
                         logger.exception("合成第 %d 句失败（已重试 %d 次）", i, len(RETRY_DELAYS))
 

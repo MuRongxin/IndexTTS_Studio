@@ -32,14 +32,6 @@ from index_tts_gui.ui.calibrate_worker import CalibrateWorker
 FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
 
-@pytest.fixture(scope="session", autouse=True)
-def qapp():
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(sys.argv)
-    yield app
-
-
 def _write_sin_wav(path, duration, sr=16000, freq=440):
     n = int(sr * duration)
     with wave.open(str(path), "wb") as w:
@@ -272,10 +264,13 @@ def test_calibrate_count_mismatch_errors(tmp_path, qapp):
 
 @pytest.mark.skipif(not FFMPEG_AVAILABLE, reason="ffmpeg/ffprobe 不可用")
 def test_calibrate_cancel_stops_worker(tmp_path, qapp):
-    """启动后立即 cancel：worker 不抛异常，可能不 emit finished。"""
+    """启动后取消：必须真的走取消分支，且不产出结果、不报错。"""
+    # 句子够多，对齐阶段才够长，取消才有机会在完成前生效
+    n = 24
     full, sentence_wavs, sentences, pauses, entries = _make_project(
-        tmp_path, n_sentences=3, durations=[0.4, 0.4, 0.4],
-        pauses=[0.2, 0.2, 0.0], modified_pauses=[0.2, 0.2, 0.0],
+        tmp_path, n_sentences=n, durations=[0.4] * n,
+        pauses=[0.2] * (n - 1) + [0.0],
+        modified_pauses=[0.2] * (n - 1) + [0.0],
     )
 
     worker = CalibrateWorker(
@@ -285,20 +280,28 @@ def test_calibrate_cancel_stops_worker(tmp_path, qapp):
         original_pauses=pauses,
         current_entries=entries,
     )
-    finished, errors = [], []
+    finished, errors, canceled = [], [], []
     worker.result_ready.connect(finished.append)
     worker.error.connect(errors.append)
+    worker.canceled.connect(lambda: canceled.append(True))
 
     worker.start()
-    worker.cancel()  # 立即取消
+    # 等线程真正进入 run()：requestInterruption() 对未运行的线程是空操作，
+    # start() 之后立刻 cancel() 存在竞态，测试会时好时坏
+    deadline = time.time() + 5.0
+    while not worker.isRunning() and time.time() < deadline:
+        qapp.processEvents()
+    assert worker.isRunning(), "线程未启动"
+    worker.cancel()
     _wait_for_worker(worker, qapp)
 
     # 取消后不应有 error（cancel 是正常路径）
     assert errors == []
     # 取消后 worker 已结束
     assert not worker.isRunning()
-    # finished 可能 emit（如果已经进入 finished 分支）也可能不 emit
-    # 都属于可接受行为
+    # 必须真的走了取消分支：否则这个测试在 cancel() 是空操作时也会通过
+    assert canceled == [True], "取消未生效：canceled 信号没有发出"
+    assert finished == [], "取消不应产出结果条目"
 
     worker.deleteLater()
     qapp.processEvents()

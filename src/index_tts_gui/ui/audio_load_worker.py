@@ -22,11 +22,20 @@ class AudioLoadWorker(QThread):
         super().__init__()
         self._filepath = filepath
 
+    def cancel(self):
+        """请求中断：run() 会在下一个检查点立即返回，不发出任何信号。"""
+        self.requestInterruption()
+
     def run(self):
+        if self.isInterruptionRequested():
+            return
         logger.info("开始后台加载音频波形: %s", self._filepath)
         try:
             engine = AudioEngine()
             ok = engine.load_audio(self._filepath)
+            if self.isInterruptionRequested():
+                logger.info("音频波形加载已取消: %s", self._filepath)
+                return
             if ok and engine.is_loaded():
                 logger.info(
                     "音频波形加载完成: %s duration=%.2fs sr=%d samples=%d",

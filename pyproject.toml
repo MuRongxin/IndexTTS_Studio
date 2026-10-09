@@ -19,6 +19,8 @@ dependencies = [
     "librosa>=0.10",
     "soundfile>=0.12",
     "numpy>=1.24",
+    # speech_aligner 直接 import scipy.signal，不应只靠 librosa 的传递依赖
+    "scipy>=1.10",
     "jieba>=0.42",
 ]
 
@@ -36,3 +38,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "index_tts_gui" = ["py.typed"]
+
+[tool.pytest.ini_options]
+# conftest.py 负责 sys.path 与 QT_QPA_PLATFORM，这里只固定发现范围
+testpaths = ["tests"]
+python_files = ["test_*.py"]

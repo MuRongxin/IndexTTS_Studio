@@ -3,13 +3,12 @@ import glob
 import logging
 import os
 import re
-import tempfile
 
 from PySide6.QtCore import QThread, Signal
 
 from index_tts_gui.core.dub_planner import build_track_pauses, plan_dub_timeline
 from index_tts_gui.core.io_ass import entries_to_ass
-from index_tts_gui.core.merger import _generate_silence, get_wav_duration, merge_wavs
+from index_tts_gui.core.merger import get_wav_duration, merge_wavs_with_custom_pauses
 from index_tts_gui.core.subtitle import SubtitleEntry
 from index_tts_gui.core.subtitler import entries_to_srt
 from index_tts_gui.core.tts_client import BaseTTSClient
@@ -30,6 +29,7 @@ class SubtitleDubWorker(QThread):
     result_ready = Signal(list)          # 输出文件路径列表（失败/取消时为空列表）
     error = Signal(str)                  # 错误信息
     log = Signal(str)                    # 日志
+    canceled = Signal()                  # 用户主动取消（与失败区分开）
 
     def __init__(
         self,
@@ -45,10 +45,24 @@ class SubtitleDubWorker(QThread):
         self._dub_dir = dub_dir
         self._client = client
         self._export_ass = export_ass
-        self._canceled = False
 
     def cancel(self):
-        self._canceled = True
+        """请求取消。用 Qt 的 interruption 机制，逐阶段检查。"""
+        self.requestInterruption()
+
+    @property
+    def _canceled(self) -> bool:
+        """是否已请求取消（保留旧属性名，兼容既有调用与测试）。"""
+        return self.isInterruptionRequested()
+
+    def _emit_canceled(self) -> None:
+        """统一的取消出口：发 canceled 而非 result_ready([])。
+
+        之前取消也走 result_ready([])，面板把它渲染成"配音失败，
+        无输出"，用户分不清是自己取消的还是出错了。
+        """
+        self.canceled.emit()
+        self.result_ready.emit([])
 
     def run(self):
         total = len(self._entries)
@@ -76,7 +90,7 @@ class SubtitleDubWorker(QThread):
                 if self._canceled:
                     self.log.emit("已取消")
                     logger.info("配音已取消，已完成 %d/%d", i - 1, total)
-                    self.result_ready.emit([])
+                    self._emit_canceled()
                     return
 
                 text = entry.text.strip()
@@ -96,8 +110,11 @@ class SubtitleDubWorker(QThread):
                     audio_bytes = self._client.synthesize(text, self._audio_name)
                 except Exception as e:
                     logger.exception("配音合成第 %d 条失败", i)
-                    self.log.emit(f"  ✗ 第 {i} 条合成失败: {e}")
-                    self.error.emit(f"第 {i} 条合成失败: {e}")
+                    msg = f"第 {i} 条合成失败: {e}"
+                    # 同时发 log：面板的 _on_error 会把 msg 写进日志面板，
+                    # 只发 error 会让失败原因在界面上完全看不到
+                    self.log.emit(f"  ✗ {msg}")
+                    self.error.emit(msg)
                     self.result_ready.emit([])
                     return
 
@@ -114,12 +131,20 @@ class SubtitleDubWorker(QThread):
 
             if self._canceled:
                 self.log.emit("已取消")
-                self.result_ready.emit([])
+                self._emit_canceled()
                 return
 
-            # 取每段实际时长
+            # 取每段实际时长。ffprobe 每段一次、每段最长 30s 超时，
+            # 取消必须在这里也能被响应，否则按"停止"会毫无反应。
             self.log.emit("📏 读取各段实际时长…")
-            durations = [get_wav_duration(p) for p in wav_paths]
+            durations = []
+            for n_done, p in enumerate(wav_paths, 1):
+                if self._canceled:
+                    self.log.emit("已取消")
+                    self._emit_canceled()
+                    return
+                durations.append(get_wav_duration(p))
+                self.progress.emit(n_done, len(wav_paths), os.path.basename(p))
 
             # 偏移规划（影响最小原则：只顺延被顶到的块）
             new_entries = plan_dub_timeline(self._entries, durations)
@@ -127,9 +152,19 @@ class SubtitleDubWorker(QThread):
             logger.info("偏移规划完成: entries=%d pauses=%s", len(new_entries), pauses)
 
             # 按静音拼接完整配音
+            if self._canceled:
+                self.log.emit("已取消")
+                self._emit_canceled()
+                return
             self.log.emit("🔀 按偏移时间轴拼接完整配音…")
             full_path = os.path.join(self._dub_dir, "dub_full.wav")
-            self._concat_with_leading_pauses(wav_paths, pauses, full_path)
+            merge_wavs_with_custom_pauses(
+                wav_paths, pauses, full_path,
+                leading=True,
+                on_progress=lambda cur, tot, msg: self.progress.emit(
+                    cur, tot, msg
+                ),
+            )
             self.log.emit(f"  ✓ {full_path}")
 
             # 导出偏移后的字幕
@@ -152,24 +187,7 @@ class SubtitleDubWorker(QThread):
 
         except Exception as e:
             logger.exception("配音任务失败")
-            self.log.emit(f"✗ 配音任务失败: {e}")
-            self.error.emit(f"配音任务失败: {e}")
+            msg = f"配音任务失败: {e}"
+            self.log.emit(f"✗ {msg}")
+            self.error.emit(msg)
             self.result_ready.emit([])
-
-    def _concat_with_leading_pauses(
-        self, wav_paths: list[str], pauses: list[float], output_path: str
-    ) -> None:
-        """把 wav_paths 与每段前的静音（pauses）交替拼成 output_path。"""
-        if not wav_paths:
-            raise RuntimeError("没有可拼接的配音片段")
-        with tempfile.TemporaryDirectory(prefix="dub_concat_") as tmpdir:
-            items: list[str] = []
-            for i, wav in enumerate(wav_paths):
-                pause = pauses[i] if i < len(pauses) else 0.0
-                if pause > 0.001:
-                    silence_path = os.path.join(tmpdir, f"silence_{i:04d}.wav")
-                    logger.debug("生成静音: index=%d duration=%.2f", i, pause)
-                    _generate_silence(pause, wav, silence_path)
-                    items.append(silence_path)
-                items.append(wav)
-            merge_wavs(items, output_path)

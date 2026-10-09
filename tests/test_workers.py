@@ -1,6 +1,6 @@
 """UI Worker 线程测试
 
-覆盖 VoiceUploadWorker、SynthesisWorker、SingleSynthesisWorker、MergeWorker、SplitWorker。
+覆盖 VoiceUploadWorker、SynthesisWorker、MergeWorker、SplitWorker。
 重点验证信号生命周期：finished 触发后可以安全 deleteLater。
 """
 
@@ -22,22 +22,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication
 
 from index_tts_gui.ui.voice_upload_worker import VoiceUploadWorker
+from index_tts_gui.ui import synthesis_worker
 from index_tts_gui.ui.synthesis_worker import SynthesisWorker
-from index_tts_gui.ui.synthesis_panel import SingleSynthesisWorker
 from index_tts_gui.ui.merge_worker import MergeWorker
 from index_tts_gui.ui.split_worker import SplitWorker
 
 
 FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
-
-
-@pytest.fixture(scope="session", autouse=True)
-def qapp():
-    """确保整个测试会话有一个 QCoreApplication。"""
-    app = QCoreApplication.instance()
-    if app is None:
-        app = QCoreApplication([])
-    yield app
 
 
 def _write_wav(path, duration, sample_rate=16000, freq=440):
@@ -232,10 +223,14 @@ def test_synthesis_worker_cancel(tmp_path, qapp):
     assert len(finished_map[0]) < 3
 
 
-def test_synthesis_worker_partial_failure(tmp_path, qapp):
+def test_synthesis_worker_partial_failure(tmp_path, qapp, monkeypatch):
     """其中一句失败时，应继续完成其他句并 finished 部分 wav_map。"""
+    # 重试退避置零：失败会被重试 len(RETRY_DELAYS)+1 次，
+    # 每次都真睡 1s/2s 会让测试毫无必要地慢 3 秒
+    monkeypatch.setattr(synthesis_worker, "RETRY_DELAYS", (0.0, 0.0))
     out_dir = tmp_path / "out"
-    client = _FakeSynthClient([b"ok", RuntimeError("tts failed")])
+    # 第二句的失败要覆盖全部重试次数
+    client = _FakeSynthClient([b"ok"] + [RuntimeError("tts failed")] * 3)
     worker = SynthesisWorker(
         sentences=["hello", "world"],
         audio_name="voice",
@@ -255,64 +250,97 @@ def test_synthesis_worker_partial_failure(tmp_path, qapp):
     assert "tts failed" in errors[0]
     assert len(finished_map) == 1
     wav_map = finished_map[0]
-    assert len(wav_map) == 1
-    assert wav_map[0]["text"] == "hello"
+    # wav_map 覆盖全部句子：失败句显式记为 status=failed，
+    # 这样保存时会覆盖该句旧条目，旧波形不会被继续当成成功
+    assert len(wav_map) == 2
+    by_index = {e["index"]: e for e in wav_map}
+    assert by_index[0]["status"] == "ok"
+    assert by_index[0]["text"] == "hello"
+    assert by_index[1]["status"] == "failed"
+    assert "tts failed" in by_index[1]["error"]
     assert (out_dir / "sentence_01_hello.wav").exists()
+    # 失败句的旧 take 必须被清掉，不能留旧波形被下游静默使用
     assert not (out_dir / "sentence_02_world.wav").exists()
 
 
-# ── SingleSynthesisWorker ──
+# ── 单句重生成（复用 SynthesisWorker(indices=[i])）──
 
-def test_single_synthesis_worker_success(tmp_path, qapp):
-    """单句重新合成成功。"""
+def test_single_regenerate_success(tmp_path, qapp):
+    """单句重新合成成功：只做 indices=[2] 这一句，其余不动。"""
     out_dir = tmp_path / "out"
     out_dir.mkdir(parents=True, exist_ok=True)
     client = _FakeSynthClient([b"single"])
-    worker = SingleSynthesisWorker(
-        index=2,
-        sentence="only one",
-        audio_name="voice",
-        output_dir=str(out_dir),
-        client=client,
+    worker = SynthesisWorker(
+        ["first", "second", "only one"], "voice", str(out_dir), client,
+        indices=[2],
     )
 
-    success, errors, logs = [], [], []
-    worker.success.connect(lambda idx, path: success.append((idx, path)))
-    worker.error.connect(lambda idx, msg: errors.append((idx, msg)))
-    worker.log.connect(logs.append)
+    done, errors, results = [], [], []
+    worker.sentence_done.connect(lambda i, path: done.append((i, path)))
+    worker.error.connect(errors.append)
+    worker.result_ready.connect(results.append)
 
     worker.start()
     _wait_for_worker(worker, qapp)
 
     assert errors == []
-    assert len(success) == 1
-    assert success[0][0] == 2
+    assert len(done) == 1
+    # sentence_done 是 1-based（与批量路径一致）
+    assert done[0][0] == 3
     assert (out_dir / "sentence_03_only_one.wav").exists()
+    # 未请求的句子不应被合成
+    assert not (out_dir / "sentence_01_first.wav").exists()
+    assert len(results) == 1
+    assert results[0][0]["status"] == "ok"
+    assert results[0][0]["index"] == 2  # wav_map 里是 0-based
 
 
-def test_single_synthesis_worker_failure(tmp_path, qapp):
-    """单句重新合成失败。"""
+def test_single_regenerate_failure(tmp_path, qapp, monkeypatch):
+    """单句重新合成失败：显式记账 status=failed。"""
+    monkeypatch.setattr(synthesis_worker, "RETRY_DELAYS", (0.0, 0.0))
     out_dir = tmp_path / "out"
-    client = _FakeSynthClient([RuntimeError("bad")])
-    worker = SingleSynthesisWorker(
-        index=0,
-        sentence="fail",
-        audio_name="voice",
-        output_dir=str(out_dir),
-        client=client,
+    client = _FakeSynthClient([RuntimeError("bad")] * 3)
+    worker = SynthesisWorker(
+        ["fail", "other"], "voice", str(out_dir), client, indices=[0],
     )
 
-    success, errors = [], []
-    worker.success.connect(lambda idx, path: success.append((idx, path)))
-    worker.error.connect(lambda idx, msg: errors.append((idx, msg)))
+    done, errors, results = [], [], []
+    worker.sentence_done.connect(lambda i, path: done.append((i, path)))
+    worker.error.connect(errors.append)
+    worker.result_ready.connect(results.append)
 
     worker.start()
     _wait_for_worker(worker, qapp)
 
-    assert success == []
+    assert done == []
     assert len(errors) == 1
-    assert errors[0][0] == 0
-    assert "bad" in errors[0][1]
+    assert "bad" in errors[0]
+    assert len(results) == 1
+    assert results[0][0]["status"] == "failed"
+    assert "bad" in results[0][0]["error"]
+
+
+def test_synthesis_worker_cancel_interrupts_backoff(tmp_path, qapp, monkeypatch):
+    """取消能打断重试退避：不必干等完整个 RETRY_DELAYS。"""
+    # 用真实退避时长，才能验证"取消打断了等待"而不是"本来就不用等"
+    monkeypatch.setattr(synthesis_worker, "RETRY_DELAYS", (5.0,))
+    out_dir = tmp_path / "out"
+    client = _FakeSynthClient([RuntimeError("boom")])
+    worker = SynthesisWorker(
+        ["x"], "voice", str(out_dir), client, indices=[0],
+    )
+    results, logs = [], []
+    worker.result_ready.connect(results.append)
+    worker.log.connect(logs.append)
+
+    worker.start()
+    qapp.processEvents()
+    worker.cancel()
+    _wait_for_worker(worker, qapp)
+
+    assert len(results) == 1
+    assert any("取消" in m for m in logs)
+    assert not list(out_dir.glob("*.wav"))
 
 
 # ── MergeWorker ──
@@ -442,16 +470,20 @@ def test_merge_worker_cancel(tmp_path, qapp):
         pauses=[0.0, 0.0],
     )
 
-    finished_entries, errors = [], []
+    finished_entries, errors, canceled = [], [], []
     worker.result_ready.connect(finished_entries.append)
     worker.error.connect(errors.append)
+    worker.canceled.connect(lambda: canceled.append(True))
 
     worker.start()
     worker.cancel()
     _wait_for_worker(worker, qapp)
 
     assert not worker.isRunning()
-    # 取消后不一定有信号，重点是没抛异常
+    assert errors == []
+    # 必须真的走了取消分支：否则 cancel() 是空操作时这个测试也会通过
+    assert canceled == [True], "取消未生效：canceled 信号没有发出"
+    assert finished_entries == [], "取消不应产出字幕条目"
 
 
 # ── SplitWorker ──
