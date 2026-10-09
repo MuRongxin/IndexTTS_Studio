@@ -10,6 +10,7 @@ import librosa
 import soundfile as sf
 
 from index_tts_gui.core.merger import get_wav_duration
+from index_tts_gui.core.splitter import word_cut_guard
 from index_tts_gui.core.subtitle import SubtitleEntry
 
 logger = logging.getLogger(__name__)
@@ -21,12 +22,17 @@ def _build_entries_for_sentence(
     wav_path: str,
     start_t: float,
     end_t: float,
-    max_chars: int,
+    max_chars: int | None,
     entry_index: int,
 ) -> tuple[list[SubtitleEntry], int]:
-    """为单句生成字幕条，返回 (entries, next_index)。"""
+    """为单句生成字幕条，返回 (entries, next_index)。
+
+    max_chars 为 None 时不做二次拆分：每个分句一条字幕。
+    分句阶段已有句长约束（用户可设上限），字幕阶段再按 24 字
+    默认值硬拆会导致字幕块与分句结果不一致。
+    """
     entries = []
-    if len(sentence) <= max_chars:
+    if max_chars is None or len(sentence) <= max_chars:
         entries.append(SubtitleEntry(entry_index, start_t, end_t, sentence))
         return entries, entry_index + 1
 
@@ -58,12 +64,13 @@ def _build_entries_for_sentence(
 def generate_srt_from_sentences(
     sentences: list[str],
     sentence_wavs: list[str],
-    max_chars: int = 24,
+    max_chars: int | None = None,
 ) -> list[SubtitleEntry]:
     """
     根据已拆分好的句子生成字幕条目（句间无额外停顿）。
 
     与 generate_srt 的区别：直接使用 sentences，不再对原文做标点分句。
+    max_chars 默认 None = 每个分句一条字幕（与分句结果一致）。
     """
     return generate_srt_from_sentences_with_pauses(
         sentences, sentence_wavs, None, max_chars
@@ -74,7 +81,7 @@ def generate_srt_from_sentences_with_pauses(
     sentences: list[str],
     sentence_wavs: list[str],
     pauses: list[float] | None = None,
-    max_chars: int = 24,
+    max_chars: int | None = None,
 ) -> list[SubtitleEntry]:
     """
     根据已拆分好的句子以及句间停顿生成字幕条目。
@@ -84,7 +91,9 @@ def generate_srt_from_sentences_with_pauses(
         sentence_wavs: 对应 WAV 路径列表
         pauses: 每句之后的停顿秒数，长度应与 sentences 相同；
                 为 None 时表示句间无停顿
-        max_chars: 单条字幕最大字数
+        max_chars: 单条字幕最大字数；默认 None = 不做二次拆分，
+                   每个分句一条字幕。显式传数值时超长句按停顿/
+                   标点/词边界切成多条子幕
     """
     durations = [get_wav_duration(p) for p in sentence_wavs]
     pauses = pauses or [0.0] * len(sentences)
@@ -276,8 +285,14 @@ def _split_by_pauses(
                     merged_sub.append(s)
             for s in merged_sub:
                 while len(s) > max_chars:
-                    final.append(s[:max_chars])
-                    s = s[max_chars:]
+                    # 切点落在词语内部时回退到词首，避免切断词语
+                    cut = max_chars
+                    guard = word_cut_guard(s)
+                    word_start = guard.get(cut)
+                    if word_start is not None and word_start > 0:
+                        cut = word_start
+                    final.append(s[:cut])
+                    s = s[cut:]
                 if s:
                     final.append(s)
         else:

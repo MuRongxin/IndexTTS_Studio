@@ -49,6 +49,27 @@ class BaseSplitter(ABC):
         ...
 
 
+def word_cut_guard(text: str) -> dict[int, int]:
+    """用 jieba 分词构建切点保护表：词内位置 → 词首位置。
+
+    硬切兜底时若切点落在词语内部（英文单词/数字串/中文词），
+    应回退到词首切分，避免把完整词语切到两句中。
+    jieba 不可用时返回空表，退回纯硬切行为。
+    """
+    try:
+        import jieba
+    except ImportError:
+        logger.warning("jieba 未安装，长句硬切可能切断词语")
+        return {}
+    guard: dict[int, int] = {}
+    pos = 0
+    for word in jieba.cut(text):
+        for i in range(pos + 1, pos + len(word)):
+            guard[i] = pos
+        pos += len(word)
+    return guard
+
+
 class RuleBasedSplitter(BaseSplitter):
     """
     基于标点和字数限制的规则拆分器。
@@ -88,6 +109,9 @@ class RuleBasedSplitter(BaseSplitter):
         if len(text) <= self.max_length:
             return [text]
 
+        # 硬切兜底的词边界保护表（jieba 不可用时为空表）
+        guard = word_cut_guard(text)
+
         parts = []
         start = 0
         while start < len(text):
@@ -101,9 +125,13 @@ class RuleBasedSplitter(BaseSplitter):
             # 2. 在停顿词前切
             if cut <= start:
                 cut = self._find_pause_word_cut(text, end)
-            # 3. 硬切
+            # 3. 硬切；切点落在词语内部时回退到词首，
+            #    避免把完整词语（英文单词/数字串/中文词）切到两句中
             if cut <= start:
                 cut = end
+                word_start = guard.get(cut)
+                if word_start is not None and word_start > start:
+                    cut = word_start
 
             parts.append(text[start:cut])
             start = cut
