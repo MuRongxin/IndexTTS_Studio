@@ -39,8 +39,8 @@ def setup_logging(level: int = logging.INFO) -> logging.Logger:
         return logger
 
     formatter = logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s %(filename)s:%(lineno)d - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+        "%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d - %(message)s",
+        datefmt="%m-%d %H:%M:%S",
     )
 
     # 文件 handler（滚动）
