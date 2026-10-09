@@ -16,6 +16,7 @@ import wave
 import shutil
 import tempfile
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -25,6 +26,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
+from index_tts_gui.core.merger import get_wav_duration
 from index_tts_gui.core.subtitle import SubtitleEntry
 from index_tts_gui.ui.calibrate_worker import CalibrateWorker
 
@@ -107,6 +109,73 @@ def _make_project(tmp_path, n_sentences, durations, pauses, modified_pauses):
             cum += pauses[i]
 
     return str(full), sentence_wavs, sentences, pauses, entries
+
+@pytest.mark.skipif(not FFMPEG_AVAILABLE, reason="ffmpeg/ffprobe 不可用")
+def test_calibrate_maps_intra_sentence_gap_insertion(tmp_path, qapp):
+    """端到端：句内插入间隔后，字幕应当被拉伸而不是整体平移。
+
+    这是修复前完全做不到的：整句只有一个锚点，句内插入的 0.4s 会被
+    字幕尾部整段漏掉。回归护栏 —— 改动后字幕尾部必须跟着后移。
+    """
+    sr = 16000
+    gap_extra = 0.4
+
+    def _voice(f0, dur, seed):
+        rng = np.random.default_rng(seed)
+        t = np.arange(int(sr * dur)) / sr
+        x = sum(a * np.sin(2 * np.pi * f0 * k * t + rng.uniform(0, 6.28))
+                for k, a in ((1, 1.0), (2, .5), (3, .33), (4, .2)))
+        env = 0.55 + 0.45 * np.sin(2 * np.pi * 4.5 * t - 1.2)
+        return (0.7 * x * env + rng.normal(0, .01, len(x))).astype(np.float32)
+
+    def _write(path, x):
+        x = np.clip(x, -1, 1)
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+            w.writeframes(b"".join(struct.pack("<h", int(v * 32000)) for v in x))
+
+    output_dir = tmp_path / "output_tts"
+    output_dir.mkdir()
+    head = _voice(150, 0.8, 1)
+    tail = _voice(240, 0.7, 2)
+    p1 = output_dir / "sentence_01_s1.wav"
+    _write(p1, np.concatenate([head, np.zeros(int(sr * 0.3), np.float32), tail]))
+    dur1 = get_wav_duration(str(p1))
+
+    full = output_dir / "full_dub.wav"
+    _write(full, np.concatenate([
+        head,
+        np.zeros(int(sr * (0.3 + gap_extra)), np.float32),
+        tail,
+    ]))
+
+    entries = [SubtitleEntry(1, 0.0, dur1, "前半，后半。")]
+    worker = CalibrateWorker(
+        modified_wav_path=str(full),
+        sentences=["前半，后半。"],
+        output_dir=str(output_dir),
+        original_pauses=[0.0],
+        current_entries=entries,
+    )
+    results, errors = [], []
+    worker.result_ready.connect(results.append)
+    worker.error.connect(errors.append)
+
+    worker.start()
+    _wait_for_worker(worker, qapp)
+
+    assert errors == []
+    assert len(results) == 1
+    out = results[0]
+    assert len(out) == 1
+    assert abs(out[0].start_sec - 0.0) < 0.1, "句首不该移动"
+    assert abs(out[0].end_sec - (dur1 + gap_extra)) < 0.25, (
+        f"字幕尾部应随后半句后移 {gap_extra}s 附近，实际 {out[0].end_sec:.2f}"
+        f"（原为 {dur1:.2f}）"
+    )
+
+    worker.deleteLater()
+    qapp.processEvents()
 
 
 # ────────────────────────────────────────────────────────────────────

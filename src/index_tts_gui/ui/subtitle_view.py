@@ -1539,7 +1539,10 @@ class SubtitlePanel(QWidget):
             original_pauses=self._project.pauses if self._project else [],
             current_entries=original_entries,
         )
-        self._calibrate_worker.log.connect(lambda msg: logger.info(msg))
+        #校准日志必须进界面，不能只写滚动文件：字幕被丢弃/拉伸/重叠都
+        # 是用户必须知道的结果，静默产出错误字幕比报错更糟
+        self._calibrate_worker.log.connect(self._on_calibrate_log)
+        self._calibrate_worker.report_ready.connect(self._on_calibrate_report)
         self._calibrate_worker.result_ready.connect(self._on_calibrate_finished)
         self._calibrate_worker.error.connect(self._on_calibrate_error)
         self._calibrate_worker.result_ready.connect(self._calibrate_worker.deleteLater)
@@ -1548,6 +1551,32 @@ class SubtitlePanel(QWidget):
         self._btn_calibrate.setEnabled(False)
         self._btn_calibrate.setText("🔄 校准中…")
         self._calibrate_worker.start()
+
+    def _on_calibrate_log(self, msg: str) -> None:
+        logger.info(msg)
+        self.status_bar_show_log(msg)
+
+    def _on_calibrate_report(self, report) -> None:
+        """把重映射的异常分类显式告诉用户。"""
+        if report is None or not report.has_issues:
+            return
+        from index_tts_gui.core.speech_aligner import report_lines
+
+        detail = "\n".join(report_lines(report, limit=10))
+        logger.warning("字幕校准存在需要确认的问题: %s", report.summary())
+        self.status_bar_show_log(f"⚠ 校准: {report.summary()}")
+        QMessageBox.warning(
+            self,
+            "字幕校准完成，但有需要确认的地方",
+            f"{report.summary()}\n\n{detail}\n\n"
+            "细节同时写入日志。可点「恢复原始版本」回到校准前的字幕。",
+        )
+
+    def status_bar_show_log(self, msg: str) -> None:
+        """把消息同时送到主窗口底部状态栏（若可用）。"""
+        bar = self.window().statusBar() if self.window() else None
+        if bar is not None and hasattr(bar, "show_log_message"):
+            bar.show_log_message(msg)
 
     def _on_calibrate_finished(self, entries):
         """校准完成：保存原字幕到备份，加载新校准字幕。"""

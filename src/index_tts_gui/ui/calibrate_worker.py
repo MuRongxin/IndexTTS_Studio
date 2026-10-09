@@ -6,12 +6,14 @@ from PySide6.QtCore import QThread, Signal
 
 from index_tts_gui.core.merger import collect_sentence_wavs, get_wav_duration
 from index_tts_gui.core.speech_aligner import (
-    align_sentences,
+    align_sentences_detailed,
     cumulative_starts,
     is_matched,
-    recalibrate_entries,
+    recalibrate_entries_detailed,
+    report_lines,
 )
 from index_tts_gui.core.subtitle import SubtitleEntry
+from index_tts_gui.core.subtitler import pause_offsets
 
 
 logger = logging.getLogger("index_tts")
@@ -26,6 +28,8 @@ class CalibrateWorker(QThread):
     result_ready = Signal(list)
     error = Signal(str)
     canceled = Signal()
+    #: 重映射结果分类（RecalibrateReport），供界面提示异常
+    report_ready = Signal(object)
 
     def __init__(
         self,
@@ -79,12 +83,20 @@ class CalibrateWorker(QThread):
         # pauses 的补齐规则统一交给 cumulative_starts，避免三处实现各自漂移
         pauses = list(self._original_pauses) if self._original_pauses else []
 
-        new_starts, scores = align_sentences(
+        # 句内停顿位置：字幕生成时用的就是同一份探测逻辑，这里再取一次
+        # 供对齐使用。用户可能把某句拆成多条字幕，也可能整句一条，两种
+        # 情况都能靠切片位移正确表达（见 speech_aligner.SentenceTimeMap）。
+        slice_offsets = [
+            pause_offsets(p, get_wav_duration(p)) for p in sentence_wavs
+        ]
+        result = align_sentences_detailed(
             self._modified_wav_path,
             sentence_wavs,
             self._sentences,
             pauses,
+            slice_offsets,
         )
+        new_starts, scores = result.starts, result.scores
         # 全部未定位 → 音频不含任何分句，直接报错
         missing = [i + 1 for i in range(len(new_starts))
                    if not is_matched(new_starts[i], scores[i])]
@@ -115,15 +127,17 @@ class CalibrateWorker(QThread):
         original_durations = [get_wav_duration(p) for p in sentence_wavs]
         old_starts = cumulative_starts(original_durations, pauses)
 
-        new_entries, dropped = recalibrate_entries(
+        new_entries, report = recalibrate_entries_detailed(
             self._current_entries,
             old_starts,
             original_durations,
             new_starts,
+            slice_offsets,
+            result.slice_deltas,
         )
 
-        msg = f"校准完成: {len(new_entries)} 条字幕已重新映射"
-        if dropped:
-            msg += f"，{dropped} 条因对应句子已不在音频中被移除"
-        self.log.emit(msg)
+        self.log.emit(f"校准完成: {report.summary()}")
+        for line in report_lines(report):
+            self.log.emit(line)
+        self.report_ready.emit(report)
         self.result_ready.emit(new_entries)

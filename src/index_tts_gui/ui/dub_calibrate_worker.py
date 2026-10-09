@@ -10,10 +10,12 @@ from index_tts_gui.core.io_ass import entries_to_ass
 from index_tts_gui.core.io_subtitle import parse_srt
 from index_tts_gui.core.merger import get_wav_duration
 from index_tts_gui.core.speech_aligner import (
-    align_sentences,
+    align_sentences_detailed,
     is_matched,
-    recalibrate_entries,
+    recalibrate_entries_detailed,
+    report_lines,
 )
+from index_tts_gui.core.subtitler import pause_offsets
 from index_tts_gui.core.subtitle import SubtitleEntry
 from index_tts_gui.core.subtitler import entries_to_srt
 
@@ -117,9 +119,15 @@ class DubCalibrateWorker(QThread):
         # 4. 对齐：在修改后音频中定位每个分段
         self.progress.emit(3, 4, "正在对齐音频…")
         texts = [e.text for e in entries]
-        new_starts, scores = align_sentences(
-            self._modified_wav_path, segment_wavs, texts, pauses,
+        # 句内停顿切片：与字幕生成侧共用subtitler.pause_offsets，
+        # 让"在一句内部插了间隔"这类编辑也能被正确映射
+        slice_offsets = [
+            pause_offsets(p, get_wav_duration(p)) for p in segment_wavs
+        ]
+        result = align_sentences_detailed(
+            self._modified_wav_path, segment_wavs, texts, pauses, slice_offsets,
         )
+        new_starts, scores = result.starts, result.scores
         # 失败判据与CalibrateWorker 统一走 is_matched，不再各自判断
         unreliable = [i + 1 for i in range(len(scores))
                        if not is_matched(new_starts[i], scores[i])]
@@ -148,16 +156,16 @@ class DubCalibrateWorker(QThread):
 
         # 5. 重新映射时间戳（结果为修改后音频中的绝对时间）
         self.progress.emit(4, 4, "重新映射字幕时间戳")
-        new_entries, dropped = recalibrate_entries(
+        new_entries, report = recalibrate_entries_detailed(
             zeroed,
             [e.start_sec for e in zeroed],
             durations,
             new_starts,
+            slice_offsets,
+            result.slice_deltas,
         )
-        if dropped:
-            self.log.emit(
-                f"  ⚠ {dropped} 条字幕因对应片段已不在音频中被移除"
-            )
+        for line in report_lines(report):
+            self.log.emit(line)
 
         # 6. 写出校准结果，不覆盖 dub_shifted.*
         outputs = []
@@ -173,6 +181,6 @@ class DubCalibrateWorker(QThread):
             outputs.append(ass_path)
             self.log.emit(f"  ✓ {ass_path}")
 
-        self.log.emit(f"校准完成: {len(new_entries)} 条字幕已重新映射")
+        self.log.emit(f"校准完成: {report.summary()}")
         logger.info("配音校准完成: %s", outputs)
         self.result_ready.emit(new_entries)

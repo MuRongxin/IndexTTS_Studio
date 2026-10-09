@@ -36,7 +36,7 @@ def _build_entries_for_sentence(
         entries.append(SubtitleEntry(entry_index, start_t, end_t, sentence))
         return entries, entry_index + 1
 
-    pauses = _detect_pauses(wav_path)
+    pauses = detect_pauses(wav_path)
     chunks = _split_by_pauses(sentence, pauses, max_chars)
 
     total_cc = sum(len(c) for c in chunks)
@@ -198,8 +198,28 @@ def _split_manuscript(text: str) -> list[str]:
 
 PUNCT = '。！？；：，、'
 
+#: 句内停顿短于此值（秒）视为无停顿，不作为切片边界
+MIN_PAUSE_SEC = 0.15
 
-def _detect_pauses(wav_path: str) -> list[float]:
+
+def pause_offsets(wav_path: str, duration: float) -> list[float]:
+    """检测句内停顿，返回**原始时间轴上**的内部切片边界（秒，升序）。
+
+    不含 0.0 与 duration —— 调用方自行拼接两端。
+    字幕生成（按停顿切子幕）与字幕校准（按停顿定位每个子幕的位移）
+    共用这一个实现，避免两侧对"哪里算停顿"产生分歧。
+
+    与 detect_pauses 的区别只在于归一化：这里直接给秒，因为校准要的
+    是时间锚点，与文本长度无关。
+    """
+    if duration <= 0:
+        return []
+    offsets = [round(p * duration, 3) for p in detect_pauses(wav_path)]
+    # 去掉贴边的停顿，避免产生零长/极短切片
+    return [o for o in offsets if MIN_PAUSE_SEC <= o <= duration - MIN_PAUSE_SEC]
+
+
+def detect_pauses(wav_path: str) -> list[float]:
     """返回归一化停顿位置列表（0~1）"""
     if not os.path.exists(wav_path):
         raise FileNotFoundError(f"音频文件不存在: {wav_path}")

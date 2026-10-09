@@ -8,7 +8,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-193%20passed-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-205%20passed-brightgreen?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square)
 
 </div>
@@ -129,17 +129,33 @@ index-tts-studio               # 📦 安装后的 console script
 
 ## 🎯 校准字幕原理
 
-校准基于 **FFT 互相关**：
+校准基于 **FFT 互相关**，分两级定位：
 
-1. 对每句原始 `sentence_XX_*.wav` 在用户调整后的 `full_dub.wav` 中定位
-2. 按"句内平移、句间按比例"构建时间映射函数
-3. 用映射函数刷新所有字幕条目的时间戳
+1. **整句级**：每句原始 `sentence_XX_*.wav` 在用户调整后的 `full_dub.wav` 中
+   全局独立定位（不设位置先验、不强制单调，因此**换语序也能对上**）
+2. **句内切片级**：句内停顿位置在生成字幕时就已知（`subtitler.pause_offsets`），
+   把每个停顿也当作一个锚点重新定位，于是"在逗号处插入了间隔"会被表达为
+   **字幕拉伸**，而不是整句平移导致尾部少一截
+3. **逐端点映射**：`start` 与 `end` 各自按所属切片映射，最后刷新字幕时间戳
 
 | 优点 | 说明 |
 |---|---|
 | 🚀 **不持久化指纹** | 按需从原始 WAV 重新提取，`project.json` 保持精简 |
 | 📈 **高鲁棒性** | 对人声处理（混响/EQ/压缩）比简单 abs 包络更稳定 |
-| 🎯 **可干预** | 低置信度句子高亮，用户可手动微调 |
+| 🔀 **支持换语序** | 逐句独立定位，语序调整后仍能对上位置 |
+| 📐 **句内编辑可用** | 句内插入间隔会拉伸字幕；删掉句首/句尾会被检出并提示 |
+
+> ⚠️ **支持边界**：句内切片依赖原 TTS 波形逐样本存在。因此**重新合成过的
+> 句子无法定位**（两遍TTS 波形不同），会被移除；同一句内**调换两半顺序**
+> 时单条连续字幕无法表达，会被移除并提示，需手工拆分。
+
+| 结果分类 | 含义 |
+|---|---|
+| 保留 | 正常映射 |
+| 内容已不在音频中 | 该句音频已被删除，字幕移除 |
+| 开头/结尾内容缺失 | 句首或句尾那半被删，已锚定另一端 |
+| 顺序被调换 | 单条字幕无法表达，已移除并提示手工拆分 |
+| 字幕重叠 | 映射后两块压在一起，日志里给出序号对，请手工调整 |
 
 ---
 
@@ -156,10 +172,10 @@ src/index_tts_gui/
 │   ├── merger.py                # 🔗 ffmpeg 音频合并 + WAV 文件名解析
 │   ├── subtitler.py             # 📝 字幕生成 + SRT 输出
 │   ├── subtitle.py              # 📋 字幕数据模型（Entry/Track/Item/Style）
-│   ├── paths.py             # 📍 数据根目录解析（配置/日志/工程落点）
+│   ├── paths.py                # 📍 数据根目录解析（配置/日志/工程落点）
 │   ├── pause_advisor.py         # 💭 LLM 停顿顾问（委托给 LLMService）
 │   ├── pause_rules.py           # 📏 标点停顿规则
-│   ├── speech_aligner.py        # 🎯 音频校准：FFT 互相关 + 时间映射
+│   ├── speech_aligner.py        # 🎯 音频校准：整句 + 句内切片两级 FFT 互相关
 │   ├── audio_speed.py           # 🎚️ 音频变速（ffmpeg atempo）
 │   ├── project.py               # 💾 工程持久化（project.json）
 │   ├── io_ass.py                # 🎨 ASS 字幕导出
@@ -198,21 +214,21 @@ pytest -v
 无头环境（CI / 服务器）无需额外变量：`tests/conftest.py` 会在 import PySide6
 之前设好 `QT_QPA_PLATFORM=offscreen` 并把 `src` 注入 `sys.path`。
 
-**193 个测试**覆盖：
+**205 个测试**覆盖：
 
 | 类别 | 数量 | 文件 |
 |---|---:|---|
 | 🧠 核心 | 8 | `test_core.py` |
 | ✂️ LLM 服务 | 19 | `test_llm_service.py` |
 | 🔗 合并 | 15 | `test_merger.py` |
-| 🎯 校准算法 | 23 | `test_speech_aligner.py` |
-| 🔄 校准 Worker | 9 | `test_calibrate_worker.py` |
-| 📄 字幕 | 63 | `test_subtitle.py` 13 · `test_subtitler.py` 14 · `test_subtitle_panel.py` 12 · `test_io_subtitle.py` 13 · `test_dub_planner.py` 11 |
+| 🎯 校准算法 | 31 | `test_speech_aligner.py` |
+| 🔄 校准 Worker | 10 | `test_calibrate_worker.py` |
+| 📄 字幕 | 65 | `test_subtitle.py` 13 · `test_subtitler.py` 16 · `test_subtitle_panel.py` 12 · `test_io_subtitle.py` 13 · `test_dub_planner.py` 11 |
 | 💾 工程 | 15 | `test_project.py` 6 · `test_project_extra.py` 9 |
 | 🎨 ASS 导出 | 2 | `test_io_ass.py` |
 | 🎚️ 变速 | 7 | `test_audio_speed.py` |
 | 🌊 波形 | 8 | `test_audio_engine.py` |
-| ⚙️ Worker | 17 | `test_workers.py` |
+| ⚙️ Worker | 18 | `test_workers.py` |
 | ✏️ 编辑器 | 7 | `test_editor_table.py` |
 
 > 需要真实 LLM / TTS 端点的调试脚本放在 `tools/`（`manual_llm_split.py`、

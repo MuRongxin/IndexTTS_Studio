@@ -10,7 +10,9 @@ import struct
 import wave
 from pathlib import Path
 
+import numpy as np
 import pytest
+import soundfile as sf
 
 from index_tts_gui.core.subtitle import SubtitleEntry
 from index_tts_gui.core.subtitler import (
@@ -20,6 +22,7 @@ from index_tts_gui.core.subtitler import (
     generate_srt,
     generate_srt_from_sentences,
     generate_srt_from_sentences_with_pauses,
+    pause_offsets,
 )
 
 FFPROBE_AVAILABLE = shutil.which("ffprobe") is not None
@@ -236,3 +239,24 @@ def test_generate_srt_from_sentences_missing_wav_raises(tmp_path: Path):
     missing = str(tmp_path / "not_exists.wav")
     with pytest.raises(RuntimeError):
         generate_srt_from_sentences(["你好。"], [missing])
+
+# ── 句内停顿切片（与校准侧共用）──
+
+def test_pause_offsets_detects_internal_silence(tmp_path: Path):
+    """句中一段静音应被识别为切片边界，并以秒返回。"""
+    sr = 8000
+    tone = np.sin(2 * np.pi * 300 * np.arange(int(sr * 0.5)) / sr)
+    sil = np.zeros(int(sr * 0.4))
+    wav = tmp_path / "s.wav"
+    sf.write(str(wav), np.concatenate([tone, sil, tone]), sr)
+
+    offsets = pause_offsets(str(wav), 1.4)
+    assert len(offsets) == 1
+    # detect_pauses 返回的是静音段的**中点**：静音跨 0.5~0.9s，中点即 0.7s
+    assert abs(offsets[0] - 0.7) < 0.05, f"停顿应在 0.7s 附近，实际 {offsets}"
+
+
+def test_pause_offsets_empty_for_degenerate_input():
+    """时长为 0 或文件不存在时返回空列表，不抛异常。"""
+    assert pause_offsets("/nonexistent.wav", 0) == []
+

@@ -567,3 +567,175 @@ def test_full_pipeline_shortened_pauses(tmp_path):
     )
     assert abs(new_starts[0] - 0.0) < 0.1
     assert abs(new_starts[1] - 0.4) < 0.2  # 0.3 + 0.1
+
+# ────────────────────────────────────────────────────────────────────
+# 句内切片级对齐与逐端点重映射
+# ────────────────────────────────────────────────────────────────────
+
+def _mk_entry(start, end, text="X"):
+    from index_tts_gui.core.subtitle import SubtitleEntry
+    return SubtitleEntry(1, start, end, text)
+
+
+def test_slice_map_stretches_across_internal_pause():
+    """核心修复：句内插入间隔后，字幕要拉伸而不是整体平移。
+
+    旧实现按中点归属、整条刚性平移，句内插入的 0.5s 会被字幕尾部
+    整段漏掉。现在 start/end 各自按所属切片映射。
+    """
+    from index_tts_gui.core.speech_aligner import (
+        AlignResult, CONFIDENCE_THRESHOLD, recalibrate_entries_detailed,
+    )
+
+    # 一句时长 2.0s，内部停顿在 1.0s -> 切片 [0,1.0) 与 [1.0,2.0)
+    # 后半切片被往后推了 0.5s（用户在逗号处加了间隔）
+    result = AlignResult([0.0], [CONFIDENCE_THRESHOLD], [[0.0, 0.5]])
+    out, report = recalibrate_entries_detailed(
+        [_mk_entry(0.0, 2.0)], [0.0], [2.0], result.starts,
+        [[1.0]], result.slice_deltas,
+    )
+    assert len(out) == 1
+    assert out[0].start_sec == 0.0
+    assert out[0].end_sec == 2.5, "句尾应随后半切片一起后移 0.5s"
+    assert not report.has_issues
+
+
+def test_slice_map_missing_start_reports_truncation():
+    """句首那半被删：必须被识别出来，而不是假装没变。"""
+    from index_tts_gui.core.speech_aligner import (
+        AlignResult, CONFIDENCE_THRESHOLD, SentenceTimeMap,
+        recalibrate_entries_detailed,
+    )
+
+    tm = SentenceTimeMap(2.0, [1.0], [None, 0.0], 0.0)
+    assert tm.map(0.0) is None, "缺失切片的映射必须返回 None 而不是回退"
+    assert tm.map(1.5) == 1.5
+
+    result = AlignResult([0.0], [CONFIDENCE_THRESHOLD], [[None, 0.0]])
+    out, report = recalibrate_entries_detailed(
+        [_mk_entry(0.0, 2.0)], [0.0], [2.0], result.starts,
+        [[1.0]], result.slice_deltas,
+    )
+    assert report.truncated_head == [1]
+    assert report.has_issues
+
+
+def test_slice_map_missing_end_reports_truncation():
+    """句尾那半被删：锚定头部并上报。"""
+    from index_tts_gui.core.speech_aligner import (
+        AlignResult, CONFIDENCE_THRESHOLD, recalibrate_entries_detailed,
+    )
+
+    result = AlignResult([0.0], [CONFIDENCE_THRESHOLD], [[0.0, None]])
+    out, report = recalibrate_entries_detailed(
+        [_mk_entry(0.0, 2.0)], [0.0], [2.0], result.starts,
+        [[1.0]], result.slice_deltas,
+    )
+    assert report.truncated_tail == [1]
+    assert out[0].start_sec == 0.0
+
+
+def test_recalibrate_reports_swapped_slices_as_unrepresentable():
+    """句内两半顺序被调换：单条连续字幕表达不了，必须丢弃并上报。"""
+    from index_tts_gui.core.speech_aligner import (
+        AlignResult, CONFIDENCE_THRESHOLD, recalibrate_entries_detailed,
+    )
+
+    # 原本切片0 在 0.0、切片1 在 1.0；现在切片0 被推到 2.0、切片1 回到 0.0
+    result = AlignResult([2.0], [CONFIDENCE_THRESHOLD], [[2.0, -1.0]])
+    out, report = recalibrate_entries_detailed(
+        [_mk_entry(0.0, 2.0)], [0.0], [2.0], result.starts,
+        [[1.0]], result.slice_deltas,
+    )
+    assert report.unswappable == [1]
+    assert out == []
+
+
+def test_recalibrate_detects_overlap():
+    """映射后互相压住的字幕必须被检出并上报。"""
+    from index_tts_gui.core.speech_aligner import (
+        AlignResult, CONFIDENCE_THRESHOLD, recalibrate_entries_detailed,
+    )
+
+    entries = [_mk_entry(0.0, 2.0, "A"), _mk_entry(1.0, 3.0, "B")]
+    entries[1].index = 2
+    result = AlignResult(
+        [0.0, 1.0], [CONFIDENCE_THRESHOLD, CONFIDENCE_THRESHOLD], [],
+    )
+    out, report = recalibrate_entries_detailed(
+        entries, [0.0, 1.0], [2.0, 2.0], result.starts, None, [],
+    )
+    assert report.overlaps == [(1, 2)]
+    assert report.has_issues
+
+
+def test_sentence_of_boundary_is_left_closed():
+    """右端点恰好落在切片起点时，仍归属前一个切片。
+
+    bisect_right 对 t == 边界返回后一段，不做处理的话每条恰好结束在
+    切片起点的字幕都会被误判成跨片并被拉伸。
+    """
+    from index_tts_gui.core.speech_aligner import SentenceTimeMap
+
+    tm = SentenceTimeMap(2.0, [1.0], [0.0, 0.5], 0.0)
+    assert tm.slice_of(0.5) == 0
+    assert tm.slice_of(1.0) == 1
+    assert tm.slice_of(1.0, at_end=True) == 0
+
+
+def test_sentence_time_map_without_slice_info_is_rigid():
+    """没有句内切片信息时退化为整句刚性平移（保持历史行为）。"""
+    from index_tts_gui.core.speech_aligner import SentenceTimeMap
+
+    tm = SentenceTimeMap(2.0, None, [], 0.25)
+    assert not tm.has_slice_info()
+    assert tm.map(0.0) == 0.25
+    assert tm.map(2.0) == 2.25
+
+
+def test_align_sentences_detailed_reports_slices(tmp_path):
+    """端到端：句内加间隔后，切片位移应反映出拉伸。"""
+    from index_tts_gui.core.merger import get_wav_duration
+    from index_tts_gui.core.speech_aligner import align_sentences_detailed
+    from index_tts_gui.core.subtitler import pause_offsets
+
+    sr = 8000
+
+    def _voice(f0, dur):
+        rng = np.random.default_rng(int(f0))
+        t = np.arange(int(sr * dur)) / sr
+        x = sum(a * np.sin(2 * np.pi * f0 * k * t + rng.uniform(0, 6.28))
+                for k, a in ((1, 1.0), (2, .5), (3, .33), (4, .2)))
+        env = 0.55 + 0.45 * np.sin(2 * np.pi * 4.5 * t - 1.2)
+        return (0.7 * x * env + rng.normal(0, .01, len(x))).astype(np.float32)
+
+    def _write(path, x):
+        x = np.clip(x, -1, 1)
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+            w.writeframes(b"".join(struct.pack("<h", int(v * 32000)) for v in x))
+
+    head = _voice(135, 0.9)
+    tail = _voice(210, 0.8)
+    p1 = tmp_path / "sentence_01_a.wav"
+    _write(p1, np.concatenate([head, np.zeros(int(sr * 0.25), np.float32), tail]))
+    dur = get_wav_duration(str(p1))
+
+    # 用真实的停顿检测给出切片边界，保证与字幕生成侧同源
+    offsets = [pause_offsets(str(p1), dur)]
+    assert offsets[0], "测试音频里应当检测到一个句内停顿"
+
+    full = tmp_path / "full.wav"
+    _write(full, np.concatenate([
+        head, np.zeros(int(sr * 0.75), np.float32), tail,
+    ]))
+
+    res = align_sentences_detailed(
+        str(full), [str(p1)], ["x"], [0.0], offsets,
+    )
+    assert res.starts[0] == 0.0, "整句起点不该动"
+    assert len(res.slice_deltas[0]) == 2
+    assert res.slice_deltas[0][1] is not None
+    assert abs(res.slice_deltas[0][1] - 0.5) < 0.25, (
+        f"后半切片位移应约等于插入的 0.5s，实际 {res.slice_deltas[0][1]}"
+    )
