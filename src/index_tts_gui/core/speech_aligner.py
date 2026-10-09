@@ -305,15 +305,28 @@ def _fingerprint_fallback(
 ) -> tuple[list[float], list[float], int]:
     """波形匹配失败的句子改用声学指纹定位。
 
-    增量合成 / 单句重新生成会换掉 take 的波形，逐样本互相关必然失败；
-    但"这段话听起来是什么样"没变，MFCC 指纹仍然能定位。
+    ⚠️ 已被实测证伪并停用（保留代码与指纹数据，仅不再参与定位）。
 
-    搜索区间用波形匹配成功的句子在音频里的实际位置夹逼 —— 指纹虽然
-    对波形变化鲁棒，但它只描述音色/音素，不足以单独在全文里唯一定位，
-    有了边界才不会误配到别处。
+    原始设想："单句重新生成只换掉这一句的波形，MFCC 指纹仍能定位"。
+    在真实项目（Fix Bug，546 句）上实测的结论与设想相反：
 
-    Returns:
-        (starts, scores, 命中句数)
+    - 同一段音频内自匹配：命中误差 <= 0.03s，看起来非常可靠；
+    - 仅音量变化（x0.6）：仍然可靠；
+    - 轻度加噪（sigma=0.02）：10 句里 4 句命中到邻近位置；
+    - **重采样 x1.03（换 take 必然带来的变速/变调）：10 句里 9 句错位**。
+
+    原因：MFCC 描述的是频谱包络的统计量，重采样会同时改变基频与
+    共振峰，包络随之漂移；而不同句子在"整段窗口的均值+方差"这个粒度
+    上本来就极其接近（实测同文本 0.016、不同文本 0.213，但窗口内
+    114/223 个候选都低于 0.08 阈值）。也就是说**不存在一个阈值**能
+    把"真的这一句"和"旁边那句"分开。
+
+    更糟的是它的失败方式是**假阳性**：被删除的句子在邻句音频里也能
+    拿到 dist=0.018 的"最佳匹配"，于是被当成"内容还在"，字幕被放到
+    一个完全无关的位置 —— 比老实报缺失糟糕得多。
+
+    所以这里直接返回，由调用方把这些句子标记为缺失并上报，用户手工
+    确认。指纹文件仍会落盘，将来若有更好的算法可以直接复用。
     """
     pending = [
         i for i in range(n)
@@ -321,55 +334,11 @@ def _fingerprint_fallback(
     ]
     if not pending:
         return starts, scores, 0
-
-    import librosa
-
-    from index_tts_gui.core import fingerprint as fp_mod
-
-    try:
-        y, sr = librosa.load(modified_wav_path, sr=fp_mod.FINGERPRINT_SR, mono=True)
-    except Exception as e:
-        logger.warning("指纹回退无法读取音频 %s: %s", modified_wav_path, e)
-        return starts, scores, 0
-    if len(y) == 0:
-        return starts, scores, 0
-
-    hop = fp_mod.HOP_LENGTH
-    mfcc_matrix = librosa.feature.mfcc(
-        y=y, sr=fp_mod.FINGERPRINT_SR, n_mfcc=fp_mod.N_MFCC, hop_length=hop,
+    logger.info(
+        "指纹回退已停用（对变速/变调不可靠），%d 句改判为缺失待人工确认",
+        len(pending),
     )
-    step_frames = max(1, fp_mod.SEARCH_STEP_SEC * fp_mod.FINGERPRINT_SR // hop)
-
-    # 边界只由波形匹配成功的句子构成，且按音频里的实际先后
-    bounds = _audio_order_bounds(n, starts, scores, audio_duration)
-    hit = 0
-    for i in pending:
-        lo, hi = bounds.get(i, (0.0, audio_duration))
-        # 窗长取该句原始时长：重新合成后时长可能变，但这是最接近的
-        # 先验，滑窗范围本身另有搜索步长覆盖。
-        win_sec = durations[i] if i < len(durations) else fp_mod.DEFAULT_WINDOW_SEC
-        frames = max(1, int(win_sec * fp_mod.FINGERPRINT_SR / hop))
-        pos, dist = fp_mod.locate(
-            fingerprints[i + 1], mfcc_matrix, hop, frames,
-            lo, hi, step_frames, fp_mod.FINGERPRINT_SR,
-        )
-        if pos >= 0 and dist <= fp_mod.MATCH_THRESHOLD:
-            starts[i] = pos
-            # 注意量纲：dist 是余弦距离（阈值 0.08），而 scores 是 NCC 置信度
-            #（阈值 0.5）。指纹通过即视为已匹配，这里必须写成一个 NCC
-            # 语义下的"可信"值，否则后面的缺失标记会把刚救回的句子
-            # 重新判为缺失。
-            scores[i] = CONFIDENCE_THRESHOLD
-            hit += 1
-            logger.info(
-                "指纹匹配: 句%d -> %.2fs (dist=%.4f)", i + 1, pos, dist,
-            )
-        else:
-            logger.info(
-                "指纹匹配未通过: 句%d dist=%.4f（阈值 %.2f）",
-                i + 1, dist, fp_mod.MATCH_THRESHOLD,
-            )
-    return starts, scores, hit
+    return starts, scores, 0
 
 
 def _audio_order_bounds(
@@ -406,6 +375,7 @@ def _locate_all_slice_deltas(
     starts: list[float],
     scores: list[float],
     audio_duration: float,
+    old_starts: list[float] | None = None,
 ) -> list[list[Optional[float]]]:
     """定位每个可靠句的句内切片，返回 [句][切片] 的位移。
 
@@ -426,8 +396,9 @@ def _locate_all_slice_deltas(
         if not offsets or not is_matched(starts[i], scores[i]):
             continue
         lo, hi = bounds.get(i, (0.0, audio_duration))
+        origin = old_starts[i] if old_starts and i < len(old_starts) else 0.0
         deltas = _locate_one_sentence_slices(
-            full_fine, sr, sentence_wavs[i], offsets, starts[i], lo, hi,
+            full_fine, sr, sentence_wavs[i], offsets, starts[i], lo, hi, origin,
         )
         if deltas:
             out[i] = deltas
@@ -445,6 +416,7 @@ def _locate_one_sentence_slices(
     new_start: float,
     lo: float,
     hi: float,
+    origin: float = 0.0,
 ) -> list[Optional[float]]:
     """定位一个分句内部各切片的位移。
 
@@ -462,7 +434,10 @@ def _locate_one_sentence_slices(
     if n_slices < 2:
         return []
 
-    sentence_delta = new_start - 0.0
+    # 整句位移必须是"新位置 - **旧位置**"。用 new_start - 0.0 会把
+    # 句子在原音频里的绝对起点当成位移，第 54 句（起点 200s）因此
+    # 多出 200s。
+    sentence_delta = new_start - origin
     # 切片 0 也要实测：用户把句首那半删掉时，只有实测才能发现，
     # 否则会退化成刚性平移、让字幕假装没变（实测里就是这样）。
     deltas: list[Optional[float]] = []
@@ -480,14 +455,17 @@ def _locate_one_sentence_slices(
         if len(template) < int(0.15 * sr):
             deltas.append(None)
             continue
-        predicted = t_start + sentence_delta
+        # 匹配在**全音频绝对时间轴**上进行（_cross_correlate_match
+        # 返回的就是绝对秒数），而 t_start 是句内相对偏移，两者差一个
+        # origin。少减一次就会让第 54 句的切片位移凭空多出 200s。
+        predicted = new_start + t_start
         st, cf = _cross_correlate_match(
             template, segment, sr, seg_lo / sr, expected_start=predicted,
         )
         if not is_matched(st, cf) or cf < SLICE_CONFIDENCE_THRESHOLD:
             deltas.append(None)
             continue
-        delta = st - t_start
+        delta = st - (origin + t_start)
         if abs(delta - sentence_delta) > SLICE_MAX_SHIFT:
             logger.info(
                 "切片 %d 匹配位置 %.2f 偏离刚性预测 %.2f 过多，不采信",
@@ -655,15 +633,14 @@ def align_sentences_detailed(
             new_starts[i], scores[i] = coarse_starts[i], coarse_conf[i]
 
     # ── 声学指纹回退：波形匹配失败的句子改用 MFCC 指纹定位 ──
-    #逐样本互相关无法跨过"重新合成"，指纹可以：它描述的是这段话
-    # 听起来是什么样。只要该句有指纹，就在这里再试一次。
+    # 该路径已被实测证伪并停用（变速/变调下不可靠，且会假阳性地把
+    # 已删除的句子"救"回错误位置），详见 _fingerprint_fallback 的文档。
+    # 保留调用是为了让日志里能看到"有 N 句本可尝试指纹但已停用"。
     if fingerprints:
-        new_starts, scores, hit = _fingerprint_fallback(
+        _fingerprint_fallback(
             modified_wav_path, fingerprints, n, original_durations,
             new_starts, scores, fine_duration,
         )
-        if hit:
-            logger.info("声学指纹回退定位了 %d 句（波形匹配失败但内容仍在）", hit)
 
     # ── 标记缺失句 ──
     # 精修后置信度仍低于阈值的句子（含能量提示验证失败的），
@@ -683,7 +660,7 @@ def align_sentences_detailed(
 
     slice_deltas = _locate_all_slice_deltas(
         full_fine, TARGET_SR, sentence_wavs, slice_offsets,
-        new_starts, scores, fine_duration,
+        new_starts, scores, fine_duration, old_starts,
     )
     return AlignResult(new_starts, scores, slice_deltas)
 
@@ -714,7 +691,8 @@ class SentenceTimeMap:
     _EPS = 1e-6
 
     def __init__(self, duration: float, offsets: list[float] | None,
-                 deltas: list[Optional[float]] | None, sentence_delta: float):
+                 deltas: list[Optional[float]] | None, sentence_delta: float,
+                 origin: float = 0.0):
         bounds = [0.0]
         bounds.extend(offsets or [])
         bounds.append(max(float(duration), 0.0))
@@ -722,6 +700,10 @@ class SentenceTimeMap:
         self._bounds = bounds
         self._deltas = list(deltas) if deltas else []
         self._fallback = sentence_delta
+        # 切片边界是**句内相对偏移**，而 map/slice_of 收到的是全音频
+        # 绝对时间。缺了这一步，第 54 句（起点 200s）会被二分到最后一个
+        # 切片，映射结果凭空多出一个句子的位移。
+        self._origin = float(origin)
 
     @property
     def slice_count(self) -> int:
@@ -737,7 +719,8 @@ class SentenceTimeMap:
         n = self.slice_count
         if n <= 0:
             return -1
-        probe = (t - self._EPS) if at_end else t
+        rel = t - self._origin
+        probe = (rel - self._EPS) if at_end else rel
         k = bisect_right(self._bounds, probe) - 1
         return max(0, min(k, n - 1))
 
@@ -790,6 +773,7 @@ def build_time_maps(
             offsets,
             slice_deltas[i] if i < len(slice_deltas) else [],
             delta,
+            old_sentence_starts[i],
         ))
     return maps
 

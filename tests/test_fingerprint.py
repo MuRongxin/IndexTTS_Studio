@@ -22,6 +22,7 @@ SR = fp.FINGERPRINT_SR
 # 只有 F0/相位/时长/噪声不同 —— 这才是"同一句话的两遍 TTS"。
 VOW_A = [(700, 90, 1.0), (1220, 110, 0.5), (2600, 170, 0.25)]
 VOW_B = [(400, 80, 1.0), (1900, 130, 0.4), (2550, 200, 0.2)]
+VOW_C = [(950, 100, 0.9), (1450, 120, 0.45), (3100, 160, 0.22)]
 
 
 def _render(formants, syllables, f0_base, seed):
@@ -167,11 +168,60 @@ def test_align_fallback_rescues_resynthesized_sentence(tmp_path):
     )
     assert plain.starts[0] < 0, "前提：纯波形匹配应当失败"
 
-    rescued = align_sentences_detailed(
+    # 指纹回退已被实测证伪并停用：变速/变调下 MFCC 包络漂移，无法把
+    # "真的这一句"和"旁边那句"分开，且会假阳性地把已删除的句子救到
+    # 无关位置。这里锁定的是"诚实失败"——宁可报缺失让用户手工确认。
+    with_fp = align_sentences_detailed(
         str(fullp), [str(p1), str(p2)], ["A", "B"], [0.4, 0.0],
         None, fp.load(str(tmp_path)),
     )
-    assert rescued.starts[0] >= 0, "指纹应当把这句救回来"
-    assert abs(rescued.starts[0] - t0) < 0.25, (
-        f"救回的位置应接近真实位置: {rescued.starts[0]:.2f} vs {t0:.2f}"
+    assert with_fp.starts[0] < 0, (
+        "指纹回退已停用：重新合成的句子必须判为缺失，"
+        f"而不是被放到错误位置（实际得到 {with_fp.starts[0]:.2f}，真实 {t0:.2f}）"
+    )
+    # full 的开头就是 B（full = [b1, gap, a1]），所以下标 1 起点为 0
+    assert with_fp.starts[1] >= 0, "未改动的句子仍应正常匹配"
+
+
+def test_fingerprint_fallback_does_not_rescue_deleted_sentence(tmp_path):
+    """已被删除的句子不能被指纹"救"到邻句位置上。
+
+    这是停用指纹回退的直接原因：删除句在邻句音频窗口里也能拿到
+    dist=0.018 的"最佳匹配"，字幕于是被放到完全无关的位置 ——
+    比老实报缺失糟糕得多。
+    """
+    from index_tts_gui.core.speech_aligner import align_sentences_detailed
+
+    a = _render(VOW_A, [0.20, 0.22, 0.20], 150, 1)
+    b = _render(VOW_B, [0.21, 0.21, 0.21], 158, 3)
+    # 句 2 的内容整段都不在 full 里（用户在剪辑软件中删掉了这一句，
+    # 但磁盘上的分句 WAV 还在，指纹文件里也还有它的指纹）
+    deleted = _render(VOW_C, [0.19, 0.23, 0.18], 149, 5)
+    gap = np.zeros(int(SR * 0.4), dtype=np.float32)
+    # A 的磁盘版本被换成了同段落的另一次渲染（波形匹配必然失败）
+    a_alt = _render(VOW_A, [0.21, 0.215, 0.205], 137, 2)
+
+    p1 = tmp_path / "sentence_01_a.wav"
+    p2 = tmp_path / "sentence_02_deleted.wav"
+    p3 = tmp_path / "sentence_03_b.wav"
+    _write(p1, a_alt)
+    _write(p2, deleted)
+    _write(p3, b)
+    fullp = tmp_path / "full.wav"
+    _write(fullp, np.concatenate([a, gap, b]))
+
+    fps = {
+        1: fp.compute(a, SR),
+        2: fp.compute(deleted, SR),
+        3: fp.compute(b, SR),
+    }
+    fp.save(str(tmp_path), fps)
+
+    res = align_sentences_detailed(
+        str(fullp), [str(p1), str(p2), str(p3)], ["A", "X", "B"], [0.4, 0.4, 0.0],
+        None, fp.load(str(tmp_path)),
+    )
+    # 句 2 的内容已不在音频中 -> 必须判缺失
+    assert res.starts[1] < 0, (
+        f"已删除的句子必须判为缺失，实际被放到 {res.starts[1]:.2f}"
     )

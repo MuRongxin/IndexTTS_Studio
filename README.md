@@ -8,7 +8,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-214%20passed-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-217%20passed-brightgreen?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square)
 
 </div>
@@ -140,15 +140,20 @@ index-tts-studio               # 📦 安装后的 console script
 
 | 优点 | 说明 |
 |---|---|
-| 🚀 **不持久化指纹** | 按需从原始 WAV 重新提取，`project.json` 保持精简 |
+| 🚀 **工程文件保持精简** | 不把指纹/切片写进 `project.json`，落盘为独立的 `fingerprints.json` |
 | 📈 **高鲁棒性** | 对人声处理（混响/EQ/压缩）比简单 abs 包络更稳定 |
 | 🔀 **支持换语序** | 逐句独立定位，语序调整后仍能对上位置 |
 | 📐 **句内编辑可用** | 句内插入间隔会拉伸字幕；删掉句首/句尾会被检出并提示 |
-| 🔊 **跨重新合成** | 声学指纹回退，重合成过的句子仍能定位 |
+| 🔊 **缺句诚实上报** | 定位不到的句子被移除并在报告里列明句号，不猜位置 |
 
-> ⚠️ **支持边界**：句内切片依赖原 TTS 波形逐样本存在。因此**重新合成过的
-> 句子无法定位**（两遍TTS 波形不同），会被移除；同一句内**调换两半顺序**
-> 时单条连续字幕无法表达，会被移除并提示，需手工拆分。
+> ⚠️ **支持边界**：定位依赖原 TTS 波形逐样本存在，因此**重新合成过的句子
+> 无法定位**（两遍 TTS 波形不同），会被移除并列出句号。同一句内**调换两半
+> 顺序**时单条连续字幕无法表达，会被移除并提示，需手工拆分。
+>
+> 曾尝试用 MFCC 声学指纹跨过"重新合成"，在真实项目上实测后**已停用**：
+> 指纹对音量变化免疫，但对换 take 必然带来的变速/变调不可靠（10 句里 9 句
+> 错位），且会把已删除的句子"救"到邻近句的位置——假阳性比老实报缺失更糟。
+> 指纹文件仍会落盘（`fingerprints.json`），留待更可靠的算法复用。
 
 | 结果分类 | 含义 |
 |---|---|
@@ -173,7 +178,7 @@ src/index_tts_gui/
 │   ├── merger.py                # 🔗 ffmpeg 音频合并 + WAV 文件名解析
 │   ├── subtitler.py             # 📝 字幕生成 + SRT 输出
 │   ├── subtitle.py              # 📋 字幕数据模型（Entry/Track/Item/Style）
-│   ├── fingerprint.py            # 🔊 声学指纹（MFCC），跨重新合成定位
+│   ├── fingerprint.py            # 🔊 声学指纹（MFCC）落盘；定位回退已实测证伪停用
 │   ├── paths.py                # 📍 数据根目录解析（配置/日志/工程落点）
 │   ├── pause_advisor.py         # 💭 LLM 停顿顾问（委托给 LLMService）
 │   ├── pause_rules.py           # 📏 标点停顿规则
@@ -216,14 +221,14 @@ pytest -v
 无头环境（CI / 服务器）无需额外变量：`tests/conftest.py` 会在 import PySide6
 之前设好 `QT_QPA_PLATFORM=offscreen` 并把 `src` 注入 `sys.path`。
 
-**214 个测试**覆盖：
+**217 个测试**覆盖：
 
 | 类别 | 数量 | 文件 |
 |---|---:|---|
 | 🧠 核心 | 8 | `test_core.py` |
 | ✂️ LLM 服务 | 19 | `test_llm_service.py` |
 | 🔗 合并 | 15 | `test_merger.py` |
-| 🎯 校准算法 | 31 | `test_speech_aligner.py` |
+| 🎯 校准算法 | 33 | `test_speech_aligner.py` |
 | 🔄 校准 Worker | 10 | `test_calibrate_worker.py` |
 | 📄 字幕 | 65 | `test_subtitle.py` 13 · `test_subtitler.py` 16 · `test_subtitle_panel.py` 12 · `test_io_subtitle.py` 13 · `test_dub_planner.py` 11 |
 | 🔊 声学指纹 | 9 | `test_fingerprint.py` |
