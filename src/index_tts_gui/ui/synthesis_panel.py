@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt, Signal
 from index_tts_gui.core.tts_client import BaseTTSClient, create_client_from_config
 from index_tts_gui.core.project import Project
 from index_tts_gui.core.merger import collect_sentence_wavs, parse_sentence_wav_name
+from index_tts_gui.core.audio_history import save_take, archive_current_takes
 from index_tts_gui.ui.merge_worker import MergeWorker
 from index_tts_gui.ui.synthesis_worker import SynthesisWorker
 from index_tts_gui.ui.voice_panel import VoicePanel
@@ -292,9 +293,10 @@ class SynthesisPanel(QWidget):
                 old_wav = os.path.join(self._output_dir, e["wav"])
                 if os.path.exists(old_wav):
                     try:
+                        save_take(self._output_dir, old_wav, e["text"], e.get("batch", ""))
                         os.remove(old_wav)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        self._log_msg(f"⚠ 旧音频归档失败，保留文件: {exc}")
             self._log_msg(f"🗑 已清理 {len(deleted)} 个过期 WAV")
 
         return unchanged, changed, new_sentences, failed
@@ -354,6 +356,7 @@ class SynthesisPanel(QWidget):
             self._sentences, self._audio_name,
             self._output_dir, self._client,
             indices=indices_to_synth,
+            previous_takes=self._project.wav_map,
         )
         self._worker.setProperty("project_dir", self._project.project_dir)
         self._worker.progress.connect(self._on_progress)
@@ -563,6 +566,7 @@ class SynthesisPanel(QWidget):
             self._sentences, self._audio_name,
             self._output_dir, self._client,
             indices=[index],
+            previous_takes=self._project.wav_map,
         )
         self._single_worker.setProperty("project_dir", self._project.project_dir)
         self._single_worker.log.connect(self._log_msg)
@@ -598,6 +602,12 @@ class SynthesisPanel(QWidget):
             self._log_msg("输出目录不存在，无需清空")
             return
 
+        try:
+            archive_current_takes(self._output_dir, self._sentences, self._project.wav_map)
+        except Exception as exc:
+            self._log_msg(f"✗ 音频归档失败，未清空输出目录: {exc}")
+            return
+
         patterns = ["sentence_*.wav", "full_dub.wav", "split_result.txt"]
         removed = 0
         for pattern in patterns:
@@ -609,6 +619,7 @@ class SynthesisPanel(QWidget):
                     self._log_msg(f"✗ 删除失败 {path}: {e}")
 
         self._log_msg(f"🗑 已清空输出目录，删除 {removed} 个文件")
+        self._log_msg("📚 合成历史已保留，可用于混合版本字幕校准")
         self._project.pauses = []
         self._project.wav_map = []
         self._project.save()

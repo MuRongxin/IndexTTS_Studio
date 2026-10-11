@@ -16,6 +16,7 @@ class SubtitleEntry:
     start_sec: float
     end_sec: float
     text: str
+    review_reason: str = ""
 
 
 @dataclass
@@ -73,6 +74,7 @@ class SubtitleItem:
     end_time: float
     text: str = ""
     style: Optional[SubtitleStyle] = None
+    review_reason: str = ""
 
     @property
     def duration(self) -> float:
@@ -107,6 +109,7 @@ class SubtitleTrack:
                     start_time=e.start_sec,
                     end_time=e.end_sec,
                     text=e.text,
+                    review_reason=e.review_reason,
                 )
             )
         track.reindex()
@@ -120,6 +123,7 @@ class SubtitleTrack:
                 start_sec=item.start_time,
                 end_sec=item.end_time,
                 text=item.text,
+                review_reason=item.review_reason,
             )
             for item in self.items
         ]
@@ -233,6 +237,7 @@ class SubtitleTrack:
             end_time=original_end_time,
             text=second_text,
             style=item.style.copy() if item.style else None,
+            review_reason=item.review_reason,
         )
         self.items.insert(idx_0based + 1, new_item)
         self.reindex()
@@ -311,6 +316,7 @@ class SubtitleTrack:
 
         item1.end_time = max(item1.end_time, item2.end_time)
         item1.text = self._merge_text([item1.text, item2.text])
+        item1.review_reason = item1.review_reason or item2.review_reason
 
         del self.items[idx2]
         self.reindex()
@@ -337,6 +343,7 @@ class SubtitleTrack:
                 text_parts.append(part)
         first_item.end_time = last_item.end_time
         first_item.text = self._merge_text(text_parts)
+        first_item.review_reason = next((item.review_reason for _, item in sorted_items if item.review_reason), "")
 
         # 删除其余项目（从后往前避免索引变化）
         to_delete = sorted(

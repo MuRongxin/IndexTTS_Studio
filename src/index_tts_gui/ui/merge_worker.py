@@ -9,6 +9,7 @@ from index_tts_gui.core.merger import (
     validate_wav_order,
 )
 from index_tts_gui.core.pause_rules import compute_pauses
+from index_tts_gui.core.audio_history import save_take
 from index_tts_gui.core.llm_service import LLMService, LLMServiceError
 from index_tts_gui.core.subtitler import generate_srt_from_sentences_with_pauses
 from index_tts_gui.core.fingerprint import (
@@ -94,6 +95,12 @@ class MergeWorker(QThread):
             for err in errors:
                 self.log.emit(f"  - {err}")
             raise RuntimeError("音频文件与当前句子不匹配，请重新合成")
+
+        # 在写出新完整音频前归档；归档失败时原来的音频/字幕仍保持成对。
+        for text, wav in zip(self._sentences, wavs):
+            self._check_canceled()
+            save_take(self._output_dir, wav, text)
+        self.log.emit("📚 已保存本次合并的分句音频版本")
 
         self._check_canceled()
         # 停顿建议阶段映射到 10%→60%：LLM 分块回调驱动进度

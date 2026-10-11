@@ -8,6 +8,7 @@ from PySide6.QtCore import QThread, Signal
 
 from index_tts_gui.core.merger import sanitize_for_filename
 from index_tts_gui.core.tts_client import TTSClient
+from index_tts_gui.core.audio_history import save_take
 
 
 logger = logging.getLogger("index_tts")
@@ -49,6 +50,7 @@ class SynthesisWorker(QThread):
         output_dir: str,
         client: TTSClient,
         indices: list[int] | None = None,
+        previous_takes: list[dict] | None = None,
     ):
         super().__init__()
         self._sentences = sentences
@@ -57,6 +59,10 @@ class SynthesisWorker(QThread):
         self._client = client
         self._indices = indices if indices is not None else list(range(len(sentences)))
         self._wav_map: list[dict] = []
+        self._previous_takes = {
+            entry.get("wav"): entry for entry in (previous_takes or [])
+            if isinstance(entry, dict) and entry.get("wav") and entry.get("text")
+        }
 
         os.makedirs(self._output_dir, exist_ok=True)
 
@@ -69,7 +75,7 @@ class SynthesisWorker(QThread):
         """是否已请求取消（保留旧属性名，兼容既有调用与测试）。"""
         return self.isInterruptionRequested()
 
-    def _remove_stale_takes(self, one_based: int, keep_path: str = ""):
+    def _remove_stale_takes(self, one_based: int, keep_path: str = "", archive_previous: bool = True):
         """删除指定序号的句子 WAV。
 
         keep_path 例外保留（合成前只删旧文件名残留，保留目标文件）；
@@ -79,6 +85,10 @@ class SynthesisWorker(QThread):
         for path in glob.glob(pattern):
             if path == keep_path:
                 continue
+            previous = self._previous_takes.get(os.path.basename(path))
+            if archive_previous and previous is not None:
+                # 文稿修改或失败清理也先归档，不能让删除旧文件绕过版本保存。
+                save_take(self._output_dir, path, previous["text"], previous.get("batch", ""))
             try:
                 os.remove(path)
             except OSError:
@@ -126,6 +136,14 @@ class SynthesisWorker(QThread):
             wav_path = os.path.join(
                 self._output_dir, f"sentence_{i:02d}_{text_part}.wav"
             )
+            # 首次升级后也保存磁盘上的旧版本；归档失败时中止，不能覆盖它。
+            if os.path.isfile(wav_path):
+                previous = self._previous_takes.get(os.path.basename(wav_path))
+                save_take(
+                    self._output_dir, wav_path,
+                    previous["text"] if previous else sentence,
+                    previous.get("batch", "") if previous else "",
+                )
             # 写新 WAV 前删除同序号的旧文件名残留（文本改动后遗留），
             # 避免合并时数量/校验不一致
             self._remove_stale_takes(i, keep_path=wav_path)
@@ -167,8 +185,9 @@ class SynthesisWorker(QThread):
                 try:
                     with open(wav_path, "wb") as f:
                         f.write(audio_bytes)
+                    save_take(self._output_dir, wav_path, sentence, batch)
                 except Exception as e:
-                    logger.exception("写入 WAV 失败: %s", wav_path)
+                    logger.exception("写入或归档 WAV 失败: %s", wav_path)
                     last_error = str(e)
                     audio_bytes = None
 
@@ -200,7 +219,8 @@ class SynthesisWorker(QThread):
                     "batch": batch,
                     "error": last_error,
                 })
-                self._remove_stale_takes(i)
+                # 旧版已经在写入前归档，此处可能是新版本的半个文件，不能用旧文本归档。
+                self._remove_stale_takes(i, archive_previous=False)
                 # 继续下一句
 
         if not self._canceled:

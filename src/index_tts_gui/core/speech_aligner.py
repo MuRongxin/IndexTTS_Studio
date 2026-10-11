@@ -26,6 +26,7 @@ import scipy.signal
 
 from index_tts_gui.core.merger import get_wav_duration
 from index_tts_gui.core.subtitle import SubtitleEntry
+from index_tts_gui.core.subtitler import pause_offsets
 
 
 logger = logging.getLogger("index_tts.speech_aligner")
@@ -76,6 +77,9 @@ class AlignResult:
     starts: list[float]
     scores: list[float]
     slice_deltas: list[list[Optional[float]]] = field(default_factory=list)
+    template_wavs: list[str] = field(default_factory=list)
+    template_durations: list[float] = field(default_factory=list)
+    template_offsets: list[list[float]] = field(default_factory=list)
 
 
 def _load_mono(wav_path: str, target_sr: int = TARGET_SR) -> np.ndarray:
@@ -387,6 +391,8 @@ def _locate_all_slice_deltas(
     scores: list[float],
     audio_duration: float,
     old_starts: list[float] | None = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> list[list[Optional[float]]]:
     """定位每个可靠句的句内切片，返回 [句][切片] 的位移。
 
@@ -403,6 +409,10 @@ def _locate_all_slice_deltas(
     out: list[list[Optional[float]]] = [[] for _ in range(n)]
 
     for i in range(n):
+        if should_cancel is not None and should_cancel():
+            return []
+        if on_progress is not None:
+            on_progress(i + 1, n, "句内切片定位")
         offsets = slice_offsets[i] if i < len(slice_offsets) else []
         if not offsets or not is_matched(starts[i], scores[i]):
             continue
@@ -502,6 +512,7 @@ def align_sentences_detailed(
     fingerprints: dict[int, list[int]] | None = None,
     on_progress: Optional[Callable[[int, int, str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
+    candidate_wavs: list[list[str]] | None = None,
 ) -> AlignResult:
     """
     在调整后的音频中定位每句原始 WAV 的位置，并给出句内切片的位移。
@@ -515,8 +526,8 @@ def align_sentences_detailed(
          （重复文本选离预期位置最近的候选峰）
       3. 能量分割只产生"待验证提示"，必须通过互相关验证
       4. 精修：高采样率下粗位置附近小窗口内重匹配
-      5. 仍不可靠的句子标记为缺失（new_starts[i] = -1.0），
-         其字幕条目会被丢弃——这句话已不在音频中
+      5. 仍不可靠的句子标记为未匹配（new_starts[i] = -1.0），
+         由调用方选择保留待复核或移除，不能仅据此断定内容已删除
       6. 句内切片级定位：对每个可靠句，把它的句内停顿位置也定位一遍，
          使句内插入/删除间隔能被正确映射（见 _locate_all_slice_deltas）
 
@@ -528,8 +539,10 @@ def align_sentences_detailed(
         on_progress: (done, total, stage) -> None，用于上报进度。
             全量校准在真实项目上要跑半小时以上，没有进度条界面看起来
             就是卡死，所以每个阶段结束时回调一次。
-        should_cancel: -> bool，返回 True 时提前放弃并返回当前已有的
-            （可能不完整的）结果。逐句检查，粒度就是单句的匹配开销。
+        should_cancel: -> bool，返回 True 时提前放弃并返回空结果。
+            逐句、逐版本检查，粒度就是单次匹配的开销。
+        candidate_wavs: 每句同文本的历史音频候选。逐版本匹配后选择相关性
+            最高的版本，原时间轴仍由 sentence_wavs 决定，不随候选版本改变。
 
     Returns:
         AlignResult：整句定位 + 句内切片位移
@@ -547,6 +560,9 @@ def align_sentences_detailed(
 
     original_durations = [get_wav_duration(p) for p in sentence_wavs]
     old_starts = cumulative_starts(original_durations, original_pauses)
+    selected_wavs = list(sentence_wavs)
+    selected_durations = list(original_durations)
+    duration_cache = dict(zip(sentence_wavs, original_durations))
 
     logger.info("加载修改后音频: %s", modified_wav_path)
     full_coarse = _load_mono(modified_wav_path, COARSE_SR)
@@ -561,16 +577,34 @@ def align_sentences_detailed(
         if _aborted():
             logger.info("对齐被取消（粗匹配阶段，第 %d/%d 句）", i + 1, n)
             return AlignResult([], [], [])
-        tpl = _load_mono(sentence_wavs[i], COARSE_SR)
-        templates_coarse.append(tpl)
-        if len(tpl) == 0 or len(tpl) > len(full_coarse):
-            logger.warning(
-                "句子 %d 模板为空或长于整段音频，标记为失败", i + 1
-            )
-            continue
-        st, cf = _cross_correlate_match(tpl, full_coarse, COARSE_SR, 0.0)
-        coarse_starts[i] = st
-        coarse_conf[i] = cf
+        best_template = np.zeros(0, dtype=np.float32)
+        paths = [sentence_wavs[i]]
+        if candidate_wavs and i < len(candidate_wavs):
+            paths.extend(candidate_wavs[i])
+        for path in dict.fromkeys(paths):
+            if _aborted():
+                return AlignResult([], [], [])
+            try:
+                tpl = _load_mono(path, COARSE_SR)
+                if path not in duration_cache:
+                    duration_cache[path] = get_wav_duration(path)
+            except Exception:
+                if path == sentence_wavs[i]:
+                    raise
+                logger.warning("历史音频无法读取，已跳过: %s", path, exc_info=True)
+                continue
+            if len(tpl) == 0 or len(tpl) > len(full_coarse):
+                continue
+            st, cf = _cross_correlate_match(tpl, full_coarse, COARSE_SR, 0.0)
+            if len(best_template) == 0 or cf > coarse_conf[i]:
+                best_template = tpl
+                coarse_starts[i], coarse_conf[i] = st, cf
+                selected_wavs[i] = path
+                selected_durations[i] = duration_cache[path]
+        templates_coarse.append(best_template)
+        st, cf = coarse_starts[i], coarse_conf[i]
+        if selected_wavs[i] != sentence_wavs[i] and is_matched(st, cf):
+            logger.info("第 %d 句使用历史合成版本: conf=%.3f", i + 1, cf)
         logger.debug("句子 %d/%d 粗匹配: start=%.3f conf=%.3f", i + 1, n, st, cf)
         # 粗匹配是耗时主体（546 句约半小时），不报进度界面就像卡死
         if on_progress is not None and (i % 5 == 0 or i + 1 == n):
@@ -588,6 +622,8 @@ def align_sentences_detailed(
 
     # ── 不可靠句：在相邻锚点区间内带位置先验重匹配 ──
     for i in range(n):
+        if _aborted():
+            return AlignResult([], [], [])
         if reliable[i]:
             continue
         left = max((j for j in range(i) if reliable[j]), default=None)
@@ -596,12 +632,12 @@ def align_sentences_detailed(
             continue
         expected = _interpolate_position(i, old_starts, coarse_starts, reliable)
         region_start = (
-            coarse_starts[left] + original_durations[left] if left is not None else 0.0
+            coarse_starts[left] + selected_durations[left] if left is not None else 0.0
         )
         region_end = coarse_starts[right] if right is not None else coarse_duration
         seg = full_coarse[int(region_start * COARSE_SR): int(region_end * COARSE_SR)]
         tpl = templates_coarse[i]
-        if len(seg) < len(tpl):
+        if len(tpl) == 0 or len(seg) < len(tpl):
             continue
         st, cf = _cross_correlate_match(
             tpl, seg, COARSE_SR, region_start, expected_start=expected
@@ -619,6 +655,8 @@ def align_sentences_detailed(
     # 验证不过就判为缺失（该句已不在音频中）。
     hints: dict[int, float] = {}
     if reliable_count == 0 or (n - reliable_count) / max(n, 1) >= 0.1:
+        if _aborted():
+            return AlignResult([], [], [])
         fallback_starts = _energy_based_segment(modified_wav_path, n)
         if len(fallback_starts) == n:
             for i in range(n):
@@ -637,14 +675,16 @@ def align_sentences_detailed(
     for i in range(n):
         if _aborted():
             logger.info("对齐被取消（精修阶段，第 %d/%d 句）", i + 1, n)
-            break
+            return AlignResult([], [], [])
+        if i % 5 == 0 or i + 1 == n:
+            _report(i + 1, "精修定位")
         if reliable[i]:
             center, margin = coarse_starts[i], REFINE_MARGIN
         elif i in hints:
             center, margin = hints[i], HINT_REFINE_MARGIN
         else:
             continue
-        tpl = _load_mono(sentence_wavs[i], TARGET_SR)
+        tpl = _load_mono(selected_wavs[i], TARGET_SR)
         if len(tpl) == 0:
             # 空模板无法匹配，可靠句回落到粗匹配位置
             if reliable[i]:
@@ -664,11 +704,6 @@ def align_sentences_detailed(
         # 精修/验证失败：可靠句保留粗匹配位置，提示句判为缺失
         if reliable[i]:
             new_starts[i], scores[i] = coarse_starts[i], coarse_conf[i]
-        if on_progress is not None and (i % 5 == 0 or i + 1 == n):
-            _report(i + 1, "精修定位")
-
-    _report(n, "句内切片定位")
-
     # ── 声学指纹回退：波形匹配失败的句子改用 MFCC 指纹定位 ──
     # 该路径已被实测证伪并停用（变速/变调下不可靠，且会假阳性地把
     # 已删除的句子"救"回错误位置），详见 _fingerprint_fallback 的文档。
@@ -681,8 +716,7 @@ def align_sentences_detailed(
 
     # ── 标记缺失句 ──
     # 精修后置信度仍低于阈值的句子（含能量提示验证失败的），
-    # 标记为缺失（new_starts=-1）：这句话已不在音频中，
-    # 其字幕条目会由 recalibrate_entries 丢弃，而不是插值到幽灵位置。
+    # 标记为未匹配（new_starts=-1），由重映射的 preserve_unmatched 策略处理。
     missing = 0
     for i in range(n):
         if is_matched(new_starts[i], scores[i]):
@@ -695,11 +729,22 @@ def align_sentences_detailed(
     logger.info("对齐完成: %d 句, 成功匹配 %d 句, 缺失 %d 句",
                 n, matched, missing)
 
+    selected_offsets = []
+    for i, path in enumerate(selected_wavs):
+        if _aborted():
+            return AlignResult([], [], [])
+        if path != sentence_wavs[i]:
+            selected_offsets.append(pause_offsets(path, selected_durations[i]))
+        else:
+            selected_offsets.append(slice_offsets[i] if slice_offsets and i < len(slice_offsets) else [])
     slice_deltas = _locate_all_slice_deltas(
-        full_fine, TARGET_SR, sentence_wavs, slice_offsets,
-        new_starts, scores, fine_duration, old_starts,
+        full_fine, TARGET_SR, selected_wavs, selected_offsets,
+        new_starts, scores, fine_duration, old_starts, should_cancel, on_progress,
     )
-    return AlignResult(new_starts, scores, slice_deltas)
+    if _aborted():
+        return AlignResult([], [], [])
+    return AlignResult(new_starts, scores, slice_deltas, selected_wavs,
+                       selected_durations, selected_offsets)
 
 
 def align_sentences(
@@ -729,12 +774,24 @@ class SentenceTimeMap:
 
     def __init__(self, duration: float, offsets: list[float] | None,
                  deltas: list[Optional[float]] | None, sentence_delta: float,
-                 origin: float = 0.0):
+                 origin: float = 0.0, template_duration: float | None = None,
+                 template_offsets: list[float] | None = None):
         bounds = [0.0]
         bounds.extend(offsets or [])
         bounds.append(max(float(duration), 0.0))
         bounds = sorted(set(round(b, 6) for b in bounds))
+        self._source_bounds = bounds
+        if template_duration is not None:
+            bounds = sorted(set(round(b, 6) for b in
+                                [0.0, *(template_offsets or []), max(template_duration, 0.0)]))
         self._bounds = bounds
+        self.retimed = self._source_bounds != self._bounds
+        # 两版停顿数相同时按停顿锚点映射；不同则只用句首/句尾缩放。
+        if len(self._source_bounds) == len(self._bounds):
+            self._source_anchors, self._template_anchors = self._source_bounds, self._bounds
+        else:
+            self._source_anchors = [0.0, max(duration, 0.0)]
+            self._template_anchors = [0.0, max(template_duration or 0.0, 0.0)]
         self._deltas = list(deltas) if deltas else []
         self._fallback = sentence_delta
         # 切片边界是**句内相对偏移**，而 map/slice_of 收到的是全音频
@@ -746,6 +803,19 @@ class SentenceTimeMap:
     def slice_count(self) -> int:
         return max(0, len(self._bounds) - 1)
 
+    def _template_time(self, t: float) -> float:
+        """将完整字幕基准上的时间换算到实际选中版本的相对坐标。"""
+        rel = t - self._origin
+        if not self.retimed or len(self._source_anchors) < 2:
+            return rel
+        src, dst = self._source_anchors, self._template_anchors
+        k = max(0, min(bisect_right(src, rel) - 1, len(src) - 2))
+        span = src[k + 1] - src[k]
+        if span <= self._EPS:
+            return rel
+        ratio = (rel - src[k]) / span
+        return dst[k] + ratio * (dst[k + 1] - dst[k])
+
     def slice_of(self, t: float, *, at_end: bool = False) -> int:
         """t 所属的切片下标。
 
@@ -756,7 +826,7 @@ class SentenceTimeMap:
         n = self.slice_count
         if n <= 0:
             return -1
-        rel = t - self._origin
+        rel = self._template_time(t)
         probe = (rel - self._EPS) if at_end else rel
         k = bisect_right(self._bounds, probe) - 1
         return max(0, min(k, n - 1))
@@ -786,7 +856,7 @@ class SentenceTimeMap:
         d = self.delta_of(k)
         if d is None:
             return None
-        return t + d
+        return self._origin + self._template_time(t) + d
 
 
 def build_time_maps(
@@ -811,6 +881,8 @@ def build_time_maps(
             slice_deltas[i] if i < len(slice_deltas) else [],
             delta,
             old_sentence_starts[i],
+            template_duration=result.template_durations[i] if i < len(result.template_durations) else None,
+            template_offsets=result.template_offsets[i] if i < len(result.template_offsets) else None,
         ))
     return maps
 
@@ -826,17 +898,20 @@ class RecalibrateReport:
     unswappable: list[int] = field(default_factory=list)      # 起止切片顺序被调换
     overlaps: list[tuple[int, int]] = field(default_factory=list)
     flat_spans: list[int] = field(default_factory=list)       # 映射后零长/负长
+    pending_review: list[int] = field(default_factory=list)   # 已保留，需要复核
 
     @property
     def has_issues(self) -> bool:
         """是否存在需要用户过目的异常（正常重映射不会置位）。"""
         return bool(
             self.dropped or self.truncated_head or self.truncated_tail
-            or self.unswappable or self.overlaps or self.flat_spans
+            or self.unswappable or self.overlaps or self.flat_spans or self.pending_review
         )
 
     def summary(self) -> str:
         bits = [f"保留 {self.kept} 条"]
+        if self.pending_review:
+            bits.append(f"{len(self.pending_review)} 条待复核")
         if self.dropped:
             bits.append(f"丢弃 {len(self.dropped)} 条（对应语音已不在音频中）")
         if self.truncated_head:
@@ -877,6 +952,9 @@ def recalibrate_entries_detailed(
     new_sentence_starts: list[float],
     slice_offsets: list[list[float]] | None = None,
     slice_deltas: list[list[Optional[float]]] | None = None,
+    template_durations: list[float] | None = None,
+    template_offsets: list[list[float]] | None = None,
+    preserve_unmatched: bool = False,
 ) -> tuple[list[SubtitleEntry], RecalibrateReport]:
     """逐端点归属地重新映射字幕时间戳。
 
@@ -885,10 +963,13 @@ def recalibrate_entries_detailed(
     字幕拉伸，"整句移动"仍然表现为刚性平移。
 
     退化策略（都记入 report，不静默）：
-    - 两端所属切片都缺失 -> 丢弃（内容已不在音频中）
+    - 两端所属切片都缺失 -> 未匹配
     - 仅起始切片缺失 -> 锚定尾部、保持原时长（开头内容被删）
     - 仅结束切片缺失 -> 锚定头部、保持原时长（结尾内容被删）
     - 起止切片的新位置顺序颠倒 -> 单条连续字幕无法表达，丢弃并上报
+
+    preserve_unmatched=True 时保留无法映射的原条目并标记待复核；
+    template_durations/template_offsets 来自选中的历史版本，用于换算句长。
 
     Returns:
         (新字幕列表, 结果分类报告)
@@ -898,6 +979,8 @@ def recalibrate_entries_detailed(
         return list(entries), RecalibrateReport(kept=len(entries))
 
     fake = AlignResult(list(new_sentence_starts), [], list(slice_deltas or []))
+    fake.template_durations = list(template_durations or [])
+    fake.template_offsets = list(template_offsets or [])
     # scores 未单独传入时，用阈值从起点推导匹配状态
     fake.scores = [
         CONFIDENCE_THRESHOLD if s >= 0 else -1.0 for s in new_sentence_starts
@@ -907,47 +990,80 @@ def recalibrate_entries_detailed(
 
     report = RecalibrateReport()
     out: list[SubtitleEntry] = []
+
+    def _unmapped(e: SubtitleEntry, orig_index: int, reason: str) -> None:
+        if preserve_unmatched:
+            out.append(SubtitleEntry(len(out) + 1, e.start_sec, e.end_sec, e.text, reason))
+            report.kept += 1
+            report.pending_review.append(orig_index)
+        else:
+            report.dropped.append(orig_index)
+
     for orig_index, e in enumerate(entries, 1):
         i = sentence_of(
             (e.start_sec + e.end_sec) / 2.0, old_sentence_starts
         )
         tm = maps[i] if 0 <= i < len(maps) else None
         if tm is None:
-            report.dropped.append(orig_index)
+            _unmapped(e, orig_index, "各版本均未能匹配，保留原时间，需手工定位")
             continue
 
         new_start = tm.map(e.start_sec)
         # 右端点按左闭右开处理：恰好落在切片起点的字幕仍属前一片
         new_end = tm.map(e.end_sec, at_end=True)
 
+        reason = ""
+        mapped_duration = max(0.0, tm._template_time(e.end_sec) - tm._template_time(e.start_sec))
         if new_start is None and new_end is None:
-            report.dropped.append(orig_index)
+            _unmapped(e, orig_index, "字幕对应的语音片段未能定位，保留原时间")
             continue
         if new_start is None:
             # 开头内容已被删除：锚定尾部并保留原时长
-            new_start = new_end - max(0.0, e.end_sec - e.start_sec)
+            new_start = new_end - mapped_duration
             report.truncated_head.append(orig_index)
+            reason = "开头片段未能定位，当前时间按结尾估算"
         elif new_end is None:
-            new_end = new_start + max(0.0, e.end_sec - e.start_sec)
+            new_end = new_start + mapped_duration
             report.truncated_tail.append(orig_index)
+            reason = "结尾片段未能定位，当前时间按开头估算"
         elif _is_swapped(tm, e):
             # 起止切片在音频里换了先后 —— 一条连续字幕表达不了
-            report.unswappable.append(orig_index)
+            if preserve_unmatched:
+                _unmapped(e, orig_index, "句内片段顺序已改变，需手工拆分和定位")
+            else:
+                report.unswappable.append(orig_index)
             continue
+
+        if tm.retimed and (
+            abs(e.start_sec - old_sentence_starts[i]) > 0.001
+            or abs(e.end_sec - (old_sentence_starts[i] + old_sentence_durations[i])) > 0.001
+        ):
+            reason = reason or "历史版本的句内节奏不同，子字幕时间已按锚点换算，需复核"
 
         new_start = max(0.0, new_start)
         if new_end <= new_start:
             new_end = new_start + 0.1
             report.flat_spans.append(orig_index)
+            reason = reason or "映射后时长无效，已设为最短时长，需手工调整"
+        if reason:
+            report.pending_review.append(orig_index)
         report.kept += 1
         out.append(SubtitleEntry(
             index=len(out) + 1,
             start_sec=round(new_start, 3),
             end_sec=round(new_end, 3),
             text=e.text,
+            review_reason=reason,
         ))
 
     report.overlaps = _find_overlaps(out)
+    if preserve_unmatched:
+        overlapping = {index for pair in report.overlaps for index in pair}
+        for orig_index, entry in enumerate(out, 1):
+            if entry.index in overlapping and not entry.review_reason:
+                entry.review_reason = "与其他字幕重叠，请试听并确认时间"
+                report.pending_review.append(orig_index)
+        report.pending_review.sort()
     return out, report
 
 
@@ -967,6 +1083,7 @@ def report_lines(report: RecalibrateReport, limit: int = 6) -> list[str]:
         lines.append(f"  {label}: {shown}{more}")
 
     _brief("内容已不在音频中（已移除）", report.dropped)
+    _brief("待复核（字幕文字已保留，请检查时间）", report.pending_review)
     _brief("开头内容缺失（已锚定尾部）", report.truncated_head)
     _brief("结尾内容缺失（已锚定头部）", report.truncated_tail)
     _brief("前后语音顺序被调换，单条字幕无法表达（已移除）",
@@ -1000,9 +1117,12 @@ def _find_overlaps(entries: list[SubtitleEntry]) -> list[tuple[int, int]]:
     之前既不检测也不上报，界面上表现为两块字幕同时亮着。
     """
     overlaps: list[tuple[int, int]] = []
-    for a, b in zip(entries, entries[1:]):
-        if b.start_sec < a.end_sec - 1e-3:
-            overlaps.append((a.index, b.index))
+    active: list[SubtitleEntry] = []
+    # 音频语序可以改变，不能按文稿相邻顺序判断重叠。
+    for b in sorted(entries, key=lambda entry: (entry.start_sec, entry.end_sec)):
+        active = [a for a in active if a.end_sec > b.start_sec + 1e-3]
+        overlaps.extend((min(a.index, b.index), max(a.index, b.index)) for a in active)
+        active.append(b)
     return overlaps
 
 

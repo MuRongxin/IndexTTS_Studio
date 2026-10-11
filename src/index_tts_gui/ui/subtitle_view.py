@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSlider,
     QSpinBox,
@@ -182,6 +183,18 @@ class SubtitlePanel(QWidget):
         self._text_edit.setPlaceholderText("选中字幕后在此编辑文本...")
         editor_layout.addWidget(self._text_edit)
 
+        review_row = QHBoxLayout()
+        self._btn_next_review = QPushButton("⚠ 下一条待复核")
+        self._btn_next_review.setToolTip("定位校准后尚未确认时间的字幕")
+        self._btn_confirm_review = QPushButton("✓ 已确认时间")
+        self._btn_confirm_review.setToolTip("试听并调整时间后，清除当前字幕的待复核标记")
+        self._btn_next_review.setVisible(False)
+        self._btn_confirm_review.setVisible(False)
+        review_row.addWidget(self._btn_next_review)
+        review_row.addWidget(self._btn_confirm_review)
+        review_row.addStretch()
+        editor_layout.addLayout(review_row)
+
         # 样式工具栏
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
@@ -290,7 +303,7 @@ class SubtitlePanel(QWidget):
         btn_row.addStretch()
 
         self._btn_calibrate = QPushButton("🔄 校准字幕")
-        self._btn_calibrate.setToolTip("加载修改间隔后的 full_dub.wav，自动重新校准字幕时间戳")
+        self._btn_calibrate.setToolTip("加载剪辑成品，使用当前及历史合成版本校准；未匹配字幕保留并标记待复核")
         self._btn_calibrate.setEnabled(False)
         self._btn_calibrate.setStyleSheet("""
             QPushButton {
@@ -380,6 +393,8 @@ class SubtitlePanel(QWidget):
         self._btn_export_ass.clicked.connect(self._export_ass)
         self._btn_calibrate.clicked.connect(self._calibrate_subtitles)
         self._btn_restore_original.clicked.connect(self._restore_original_subtitles)
+        self._btn_next_review.clicked.connect(self._select_next_review)
+        self._btn_confirm_review.clicked.connect(self._confirm_review)
 
         # 全局快捷键
         # 必须用 WidgetWithChildrenShortcut：ApplicationShortcut 在
@@ -481,7 +496,8 @@ class SubtitlePanel(QWidget):
         if not isinstance(text, str):
             text = str(text)
         return SubtitleEntry(
-            index=index, start_sec=start_sec, end_sec=end_sec, text=text
+            index=index, start_sec=start_sec, end_sec=end_sec, text=text,
+            review_reason=str(raw.get("review_reason") or ""),
         )
 
     def _save_subtitles_to_project(self):
@@ -956,6 +972,32 @@ class SubtitlePanel(QWidget):
         text_display = item.text.replace("\n", " ")[:80]
         text_item = QTableWidgetItem(text_display)
         self._table.setItem(row, 4, text_item)
+        if item.review_reason:
+            for column in range(self._table.columnCount()):
+                cell = self._table.item(row, column)
+                if cell is not None:
+                    cell.setForeground(QColor("#d97706"))
+                    cell.setToolTip(f"待复核：{item.review_reason}")
+
+    def _select_next_review(self):
+        pending = [item for item in self._track.items if item.review_reason]
+        if not pending:
+            return
+        item = next((item for item in pending if item.index > self._current_edit_index), pending[0])
+        self.select_row(item.index)
+        self._seek_to(round(item.start_time * 1000))
+        self._update_button_states()
+
+    def _confirm_review(self):
+        item = self._track.get_item(self._current_edit_index)
+        if item is None or not item.review_reason:
+            return
+        self._push_undo()
+        item.review_reason = ""
+        self.refresh_table()
+        self._update_info_label()
+        self._update_button_states()
+        self._save_subtitles_to_project()
 
     def select_row(self, index: int):
         if index < 1:
@@ -1285,6 +1327,8 @@ class SubtitlePanel(QWidget):
             parts.append(f"后顿 {next_pause:.2f}s")
 
         warnings = []
+        if item.review_reason:
+            warnings.append(f"待复核：{item.review_reason}")
         if cps > 6:
             warnings.append(f"字速 {cps:.1f} 偏快")
         if item.duration < 0.5:
@@ -1438,6 +1482,11 @@ class SubtitlePanel(QWidget):
 
     def _update_button_states(self):
         has_selection = self._current_edit_index >= 0
+        has_review = any(item.review_reason for item in self._track.items)
+        selected = self._track.get_item(self._current_edit_index)
+        self._btn_next_review.setVisible(has_review)
+        self._btn_confirm_review.setVisible(has_review)
+        self._btn_confirm_review.setEnabled(bool(selected and selected.review_reason))
         self._btn_split.setEnabled(has_selection)
         self._btn_delete.setEnabled(has_selection)
         self._btn_offset.setEnabled(has_selection)
@@ -1512,7 +1561,7 @@ class SubtitlePanel(QWidget):
             return
 
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择修改间隔后的音频", self._output_dir(),
+            self, "选择最终剪辑音频（可混用各次合成版本）", self._output_dir(),
             "音频文件 (*.wav *.mp3 *.flac)"
         )
         if not path:
@@ -1539,14 +1588,17 @@ class SubtitlePanel(QWidget):
             original_pauses=self._project.pauses if self._project else [],
             current_entries=original_entries,
         )
-        #校准日志必须进界面，不能只写滚动文件：字幕被丢弃/拉伸/重叠都
+        # 校准日志必须进界面：待复核/拉伸/重叠都
         # 是用户必须知道的结果，静默产出错误字幕比报错更糟
         self._calibrate_worker.log.connect(self._on_calibrate_log)
+        self._calibrate_worker.progress.connect(self._on_calibrate_progress)
+        self._calibrate_worker.canceled.connect(self._on_calibrate_canceled)
         self._calibrate_worker.report_ready.connect(self._on_calibrate_report)
         self._calibrate_worker.result_ready.connect(self._on_calibrate_finished)
         self._calibrate_worker.error.connect(self._on_calibrate_error)
         self._calibrate_worker.result_ready.connect(self._calibrate_worker.deleteLater)
         self._calibrate_worker.error.connect(self._calibrate_worker.deleteLater)
+        self._calibrate_worker.canceled.connect(self._calibrate_worker.deleteLater)
 
         self._btn_calibrate.setEnabled(False)
         self._btn_calibrate.setText("🔄 校准中…")
@@ -1555,6 +1607,15 @@ class SubtitlePanel(QWidget):
     def _on_calibrate_log(self, msg: str) -> None:
         logger.info(msg)
         self.status_bar_show_log(msg)
+
+    def _on_calibrate_progress(self, current: int, total: int, stage: str) -> None:
+        self._btn_calibrate.setText(f"🔄 {stage}")
+
+    def _on_calibrate_canceled(self) -> None:
+        self._calibrate_worker = None
+        self._btn_calibrate.setText("🔄 校准字幕")
+        self._update_button_states()
+        self.status_bar_show_log("字幕校准已取消，原字幕已保留")
 
     def _on_calibrate_report(self, report) -> None:
         """把重映射的异常分类显式告诉用户。"""
@@ -1620,7 +1681,8 @@ class SubtitlePanel(QWidget):
         from PySide6.QtWidgets import QMessageBox
         QMessageBox.information(
             self, "校准完成",
-            f"已重新映射 {len(entries)} 条字幕时间戳。\n"
+            f"已保留 {len(entries)} 条字幕，其中 {sum(bool(e.review_reason) for e in entries)} 条待复核。\n"
+            "橙色条目为待复核字幕，可点击「下一条待复核」检查。\n"
             "原字幕可通过 Ctrl+Z 恢复。"
         )
 

@@ -4,7 +4,7 @@ import os
 
 from PySide6.QtCore import QThread, Signal
 
-from index_tts_gui.core.merger import collect_sentence_wavs, get_wav_duration
+from index_tts_gui.core.merger import collect_sentence_wavs, get_wav_duration, validate_wav_order
 from index_tts_gui.core.speech_aligner import (
     align_sentences_detailed,
     cumulative_starts,
@@ -15,6 +15,7 @@ from index_tts_gui.core.speech_aligner import (
 from index_tts_gui.core.subtitle import SubtitleEntry
 from index_tts_gui.core.subtitler import pause_offsets
 from index_tts_gui.core.fingerprint import load as load_fingerprints
+from index_tts_gui.core.audio_history import candidate_takes
 
 
 logger = logging.getLogger("index_tts")
@@ -74,7 +75,17 @@ class CalibrateWorker(QThread):
             raise RuntimeError(
                 f"分句音频数 ({len(sentence_wavs)}) 与句子数 ({len(self._sentences)}) 不一致"
             )
+        if validate_wav_order(sentence_wavs, self._sentences):
+            raise RuntimeError("当前分句音频与完整文稿不一致，请先生成完整音频和字幕")
         self.log.emit(f"已找到 {len(sentence_wavs)} 个分句音频")
+        candidates = []
+        for text, path in zip(self._sentences, sentence_wavs):
+            if self._canceled:
+                self.canceled.emit()
+                return
+            candidates.append(candidate_takes(self._output_dir, text, path))
+        history_count = sum(map(len, candidates))
+        self.log.emit(f"已收集 {history_count} 个历史音频版本，将逐句选择匹配版本")
 
         if self._canceled:
             self.canceled.emit()
@@ -111,20 +122,22 @@ class CalibrateWorker(QThread):
             fingerprints,
             on_progress=_on_progress,
             should_cancel=lambda: self._canceled,
+            candidate_wavs=candidates,
         )
         new_starts, scores = result.starts, result.scores
-        if not new_starts:
+        if self._canceled or not new_starts:
             # 对齐中途被取消：不是"音频里一句都找不到"，别报成误导性的错
             self.canceled.emit()
             return
-        # 全部未定位 → 音频不含任何分句，直接报错
+        # 全部未定位时中止，保留当前完整字幕，避免误把其他音频当作校准成品。
         missing = [i + 1 for i in range(len(new_starts))
                    if not is_matched(new_starts[i], scores[i])]
         if missing and len(missing) == len(self._sentences):
             raise RuntimeError(
                 "未能在该音频中匹配到任何分句音频。\n"
                 "请确认加载的是【调整间隔后的配音音频】"
-                "（full_dub.wav 或其编辑版本），而非视频原声或其他人声文件。"
+                "或由本工程各次合成片段组成的剪辑成品。\n"
+                "当前版本和已保存的历史版本均未匹配；已经覆盖且未归档的旧音频无法找回。"
             )
         unreliable = [i + 1 for i in range(len(scores))
                        if not is_matched(new_starts[i], scores[i])]
@@ -133,10 +146,13 @@ class CalibrateWorker(QThread):
             more = "…" if len(unreliable) > 10 else ""
             self.log.emit(
                 f"{len(unreliable)} 句未能定位"
-                "（可能已被删除，或该句后来重新合成过——"
-                "两遍 TTS 合成波形不同，无法用当前分句音频匹配），"
-                f"对应字幕将被移除: {shown}{more}"
+                "（可能未保存对应版本，或片段被删改），"
+                f"对应字幕保留原时间并标记待复核: {shown}{more}"
             )
+        historical = [i + 1 for i, path in enumerate(result.template_wavs)
+                      if path != sentence_wavs[i] and is_matched(new_starts[i], scores[i])]
+        if historical:
+            self.log.emit(f"已从历史版本匹配 {len(historical)} 句，将采用对应版本的实际时长")
 
         if self._canceled:
             self.canceled.emit()
@@ -154,6 +170,9 @@ class CalibrateWorker(QThread):
             new_starts,
             slice_offsets,
             result.slice_deltas,
+            template_durations=result.template_durations,
+            template_offsets=result.template_offsets,
+            preserve_unmatched=True,
         )
 
         self.log.emit(f"校准完成: {report.summary()}")
