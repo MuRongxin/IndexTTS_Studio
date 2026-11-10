@@ -15,7 +15,10 @@ keywords = ["tts", "subtitle", "speech-synthesis", "pyside6"]
 dependencies = [
     "PySide6>=6.5",
     "requests>=2.28",
+    "websocket-client>=1.6",
     "openai>=1.0",
+    # llm_client 直接构造 httpx.Client 接管代理配置（openai 的传递依赖，显式声明）
+    "httpx>=0.23",
     "librosa>=0.10",
     "soundfile>=0.12",
     "numpy>=1.24",

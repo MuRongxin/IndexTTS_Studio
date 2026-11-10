@@ -11,7 +11,7 @@ import tempfile
 
 from PySide6.QtCore import Qt, QSize, Signal, QUrl, QEvent, QThread
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-from PySide6.QtGui import QDragEnterEvent, QDropEvent
+from PySide6.QtGui import QBrush, QColor, QDragEnterEvent, QDropEvent, QFont
 
 from index_tts_gui.core.tts_client import BaseTTSClient, create_client_from_config
 from index_tts_gui.core.project import Project
@@ -118,6 +118,11 @@ class _AudioListItem(QWidget):
 
 class VoicePanel(QWidget):
     """音色管理：拖放参考音频 + 试听 + 上传"""
+
+    # 合成片段条目的附加数据角色（UserRole 已用于 0-based 句序号）
+    _SEG_FILE_ROLE = Qt.UserRole + 1
+    _SEG_STATE_ROLE = Qt.UserRole + 2
+    _SEG_NOTE_ROLE = Qt.UserRole + 3
 
     audio_uploaded = Signal(str)  # 上传成功后发射音频名
     audio_removed = Signal()      # 当前使用中的音色被移除
@@ -305,7 +310,16 @@ class VoicePanel(QWidget):
                 color: #333;
             }
         """)
+        # 条目样式重置用（标红/恢复默认时不能凭空猜字体）
+        self._segment_default_font = QFont(self._segment_list_widget.font())
         seg_col.addWidget(self._segment_list_widget, 1)
+
+        # 片段列表下方的状态提示（例如"源文本已修改，需重新合成"）
+        self._seg_hint = QLabel("")
+        self._seg_hint.setStyleSheet("color: #c62828; font-size: 11px;")
+        self._seg_hint.setWordWrap(True)
+        self._seg_hint.setVisible(False)
+        seg_col.addWidget(self._seg_hint)
 
         self._seg_speed_panel = QFrame()
         self._seg_speed_panel.setVisible(False)
@@ -694,22 +708,111 @@ class VoicePanel(QWidget):
         """列表项移除按钮。"""
         self._remove_audio_path(path)
 
-    def add_segment(self, index: int, filename: str):
-        """合成完成一句后追加到右侧片段列表。
+    # ── 合成片段列表 ──
+    #
+    # 条目状态 state：
+    #   ok      — 已有音频且与当前句子一致
+    #   changed — wav_map 里记录的文本与当前句子不同（源句子被修改，需重新合成）→ 标红
+    #   failed  — 上次合成失败（wav_map.status == "failed"）
+    #   missing — 该句没有音频文件（未合成/文件被删）
 
-        index 为 1-based 句子序号，内部统一存储为 0-based。
-        """
-        item = QListWidgetItem(f"📄 {filename}")
+    def _segment_state_text(self, filename: str, state: str) -> str:
+        """条目显示文本。filename 为空表示占位条目（没有音频文件）。"""
+        if state == "changed":
+            return (
+                f"✏ {filename}（文本已修改，需重新合成）"
+                if filename else "✏ 缺失（文本已修改，需重新合成）"
+            )
+        if state == "failed":
+            return (
+                f"⚠ {filename}（上次合成失败，需重新合成）"
+                if filename else "⚠ 上次合成失败（需重新合成）"
+            )
+        if state == "missing":
+            return "⚠ 缺失（未合成或失败）"
+        return f"📄 {filename}"
+
+    def _segment_state_tooltip(
+        self, index: int, filename: str, state: str, note: str
+    ) -> str:
+        target = f"第 {index + 1} 句"
+        if filename:
+            target += f": {filename}"
+        if state == "changed":
+            tip = target + "\n⚠ 源句子已修改，列表中已标红，需重新合成"
+        elif state == "failed":
+            tip = target + "\n⚠ 上次合成失败，需重新合成"
+        elif state == "missing":
+            tip = target + "\n⚠ 该句尚无音频文件（未合成或失败）"
+        else:
+            tip = target + "\n双击预览，选中可重新生成"
+        if note:
+            tip += f"\n{note}"
+        return tip
+
+    def _apply_segment_state(
+        self, item: QListWidgetItem, filename: str, state: str, note: str = ""
+    ) -> None:
+        """按状态刷新片段条目的文字、颜色、字体和提示。"""
+        index = item.data(Qt.UserRole)
+        state = state or ("ok" if filename else "missing")
+        if (
+            item.data(self._SEG_STATE_ROLE) == state
+            and item.data(self._SEG_FILE_ROLE) == filename
+            and item.data(self._SEG_NOTE_ROLE) == note
+        ):
+            # 状态没变：跳过 setText/setFont/样式刷新，避免大列表编辑时逐条重绘
+            return
+        item.setData(self._SEG_FILE_ROLE, filename)
+        item.setData(self._SEG_STATE_ROLE, state)
+        item.setData(self._SEG_NOTE_ROLE, note)
+        item.setText(self._segment_state_text(filename, state))
+        item.setToolTip(self._segment_state_tooltip(index, filename, state, note))
+        if state in ("changed", "failed"):
+            # 需要重新合成：红字 + 淡红底 + 加粗
+            item.setForeground(QBrush(QColor("#c62828")))
+            item.setBackground(QBrush(QColor("#ffebee")))
+            font = QFont(self._segment_default_font)
+            font.setBold(True)
+            item.setFont(font)
+        elif state == "missing":
+            item.setForeground(QBrush(QColor("#e65100")))
+            item.setData(Qt.BackgroundRole, None)
+            item.setFont(self._segment_default_font)
+        else:
+            item.setData(Qt.ForegroundRole, None)
+            item.setData(Qt.BackgroundRole, None)
+            item.setFont(self._segment_default_font)
+
+    def _make_segment_item(
+        self, index: int, filename: str, state: str, note: str
+    ) -> QListWidgetItem:
+        item = QListWidgetItem()
         item.setData(Qt.UserRole, index - 1)  # 统一存储 0-based 索引
-        item.setToolTip(f"第 {index} 句: {filename}\n双击预览，选中可重新生成")
+        self._apply_segment_state(item, filename, state, note)
+        return item
+
+    def add_segment(
+        self, index: int, filename: str, state: str = "ok", note: str = ""
+    ) -> None:
+        """向右侧合成片段列表追加一条（index 为 1-based 句子序号）。"""
+        item = self._make_segment_item(index, filename, state, note)
         self._segment_list_widget.addItem(item)
         self._segment_list_widget.scrollToBottom()
 
-    def update_segment(self, index: int, filename: str):
+    def add_missing_segment(
+        self, index: int, state: str = "missing", note: str = ""
+    ) -> None:
+        """为没有音频文件的句子插入占位条目（index 为 1-based）。"""
+        self.add_segment(index, "", state, note)
+
+    def update_segment(
+        self, index: int, filename: str, state: str = "ok", note: str = ""
+    ) -> None:
         """更新（或按序号插入）指定句的片段条目。
 
         增量合成时列表可能已含该句的旧条目（旧文件名/旧 take），
-        直接 add 会产生重复，因此：已有同序号条目则原位更新文件名，
+        直接 add 会产生重复，因此：已有同序号条目则原位更新，
         没有则按序号有序插入。index 为 1-based。
         """
         target = index - 1  # 0-based
@@ -717,18 +820,55 @@ class VoicePanel(QWidget):
         for row in range(list_widget.count()):
             item = list_widget.item(row)
             if item.data(Qt.UserRole) == target:
-                item.setText(f"📄 {filename}")
-                item.setToolTip(f"第 {index} 句: {filename}\n双击预览，选中可重新生成")
+                self._apply_segment_state(item, filename, state, note)
                 return
             if item.data(Qt.UserRole) is not None and item.data(Qt.UserRole) > target:
-                new_item = QListWidgetItem(f"📄 {filename}")
-                new_item.setData(Qt.UserRole, target)
-                new_item.setToolTip(f"第 {index} 句: {filename}\n双击预览，选中可重新生成")
+                new_item = self._make_segment_item(index, filename, state, note)
                 list_widget.insertItem(row, new_item)
                 list_widget.scrollToItem(new_item)
                 return
         # 序号比现有所有条目都大（或列表为空）→ 追加
-        self.add_segment(index, filename)
+        self.add_segment(index, filename, state, note)
+
+    def update_segment_states(
+        self, states: dict[int, tuple[str, str]]
+    ) -> None:
+        """按 {0-based 句序号: (state, note)} 就地刷新片段条目状态。
+
+        不重建列表，保留选中项与滚动位置；states 里没有的序号按条目
+        现有信息重置（有条目文件名 → ok，占位条目 → missing）。
+        """
+        list_widget = self._segment_list_widget
+        for row in range(list_widget.count()):
+            item = list_widget.item(row)
+            index = item.data(Qt.UserRole)
+            if not isinstance(index, int):
+                continue
+            state, note = states.get(index, ("", ""))
+            filename = item.data(self._SEG_FILE_ROLE) or ""
+            self._apply_segment_state(item, filename, state, note)
+
+    def current_segment_index(self) -> int | None:
+        """当前选中的片段序号（0-based），无选中返回 None。"""
+        item = self._segment_list_widget.currentItem()
+        if item is None:
+            return None
+        index = item.data(Qt.UserRole)
+        return index if isinstance(index, int) else None
+
+    def select_segment(self, index: int) -> None:
+        """按 0-based 序号选中片段条目（用于列表重建后恢复选中）。"""
+        for row in range(self._segment_list_widget.count()):
+            item = self._segment_list_widget.item(row)
+            if item.data(Qt.UserRole) == index:
+                self._segment_list_widget.setCurrentItem(item)
+                return
+
+    def set_segment_hint(self, text: str) -> None:
+        """设置片段列表下方的提示文字（空字符串隐藏）。"""
+        text = (text or "").strip()
+        self._seg_hint.setText(text)
+        self._seg_hint.setVisible(bool(text))
 
     def _on_segment_selection_changed(self):
         """片段选中变化时，通知外部更新按钮状态。"""
@@ -765,8 +905,9 @@ class VoicePanel(QWidget):
             self._player.play()
 
     def clear_segments(self):
-        """清空合成片段列表。"""
+        """清空合成片段列表与底部提示。"""
         self._segment_list_widget.clear()
+        self.set_segment_hint("")
 
     # ── 播放控制 ──
 
@@ -885,7 +1026,7 @@ class VoicePanel(QWidget):
         self._player.stop()
         self._player.setSource(QUrl())
         self._audio_list_widget.clear()
-        self._segment_list_widget.clear()
+        self.clear_segments()
 
     def get_audio_name(self) -> str:
         return self._audio_name

@@ -258,10 +258,14 @@ class IndexTTS2Client(BaseTTSClient):
         return resp.content
 
 
+from index_tts_gui.core.tts_websocket_client import IndexTTSWebSocketClient
+
+
 # Provider 工厂
 FACTORY: dict[str, type[BaseTTSClient]] = {
     "index_tts": IndexTTSClient,
     "index_tts2": IndexTTS2Client,
+    "index_tts_ws": IndexTTSWebSocketClient,
 }
 
 

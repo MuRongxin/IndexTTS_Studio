@@ -92,6 +92,37 @@ class SynthesisPanel(QWidget):
         self._status_label = QLabel("等待开始…")
         layout.addWidget(self._status_label)
 
+        # 源文本被修改的句子：列表已标红，这里提供一次性重新合成入口。
+        # 没有过期句子时整行隐藏，避免界面常驻无效按钮。
+        self._stale_row = QWidget()
+        stale_layout = QHBoxLayout(self._stale_row)
+        stale_layout.setContentsMargins(0, 0, 0, 0)
+        stale_layout.setSpacing(10)
+
+        self._stale_label = QLabel("")
+        self._stale_label.setStyleSheet(
+            "color: #c62828; font-size: 12px; font-weight: bold;"
+        )
+        stale_layout.addWidget(self._stale_label)
+
+        self._btn_regen_changed = QPushButton("🔄 重新合成文本修改语句")
+        self._btn_regen_changed.setToolTip("一次性重新合成所有源文本已修改的句子，其余句子跳过")
+        self._btn_regen_changed.setStyleSheet("""
+            QPushButton {
+                background: #ef6c00; color: white;
+                padding: 8px 18px; border-radius: 6px;
+                font-size: 13px; font-weight: bold;
+            }
+            QPushButton:hover { background: #e65100; }
+            QPushButton:disabled { background: #ccc; }
+        """)
+        self._btn_regen_changed.clicked.connect(self._start_regen_changed)
+        stale_layout.addWidget(self._btn_regen_changed)
+        stale_layout.addStretch()
+
+        self._stale_row.setVisible(False)
+        layout.addWidget(self._stale_row)
+
         # 控制按钮
         ctrl = QHBoxLayout()
         self._btn_start = QPushButton("▶ 开始合成")
@@ -210,6 +241,10 @@ class SynthesisPanel(QWidget):
         self._sentences = sentences
         self._progress.setMaximum(len(sentences))
         self._refresh_merge_button()
+        # 源句子可能被编辑/查找替换修改：立即重算哪些已合成句子过期并标红，
+        # 并同步“重新合成文本修改语句”按钮的显隐/可用状态
+        self._refresh_segment_states()
+        self._refresh_regen_changed_button()
 
     def set_audio_name(self, name: str):
         self._audio_name = name
@@ -301,6 +336,71 @@ class SynthesisPanel(QWidget):
 
         return unchanged, changed, new_sentences, failed
 
+    # ── 文本修改语句的批量重合成 ──
+
+    def _synthesis_busy(self) -> bool:
+        """是否有批量/单句合成任务正在运行。"""
+        if self._worker is not None and self._worker.isRunning():
+            return True
+        if self._single_worker is not None and self._single_worker.isRunning():
+            return True
+        return False
+
+    def _changed_sentence_indices(self) -> list[int]:
+        """当前源文本已修改（需重新合成）的 0-based 句子索引。"""
+        return sorted(
+            i for i, (state, _note) in self._segment_states().items()
+            if state == "changed"
+        )
+
+    def _refresh_regen_changed_button(self):
+        """按「源文本已修改」的句子数量显隐并启用一键重合成按钮。"""
+        changed = self._changed_sentence_indices()
+        count = len(changed)
+        self._stale_row.setVisible(count > 0)
+        self._stale_label.setText(
+            f"✏ {count} 句源文本已修改，需要重新合成" if count else ""
+        )
+        enabled = count > 0 and not self._synthesis_busy() and self._client is not None
+        self._btn_regen_changed.setEnabled(enabled)
+        if count:
+            self._btn_regen_changed.setToolTip(
+                f"仅重新合成源文本已修改的 {count} 句，其余句子跳过"
+            )
+        else:
+            self._btn_regen_changed.setToolTip("当前没有源文本修改的句子")
+
+    def _start_regen_changed(self):
+        """一键重新合成所有「源文本已修改」的句子（其余句子跳过）。"""
+        if self._synthesis_busy():
+            self._log_msg("⚠ 已有合成任务在运行，请稍候")
+            return
+        if self._client is None:
+            self._log_msg("⚠ 未配置 TTS API，请在左侧「设置」中填写 API URL")
+            return
+        if not self._sentences:
+            self._log_msg("⚠ 请先在文稿面板拆分句子")
+            return
+        if not self._audio_name:
+            self._log_msg("⚠ 请先在音色面板上传参考音频")
+            return
+
+        changed = self._changed_sentence_indices()
+        if not changed:
+            self._log_msg("✅ 没有源文本修改的句子，无需重新合成")
+            self._refresh_regen_changed_button()
+            return
+
+        shown = [i + 1 for i in changed[:10]]
+        suffix = "…" if len(changed) > 10 else ""
+        self._begin_batch_synthesis(
+            changed,
+            log_message=(
+                f"🔄 仅重新合成 {len(changed)} 句源文本已修改的句子"
+                f"（第 {', '.join(map(str, shown))}{suffix} 句）"
+            ),
+        )
+
     def _start(self):
         if self._client is None:
             self._log_msg("⚠ 未配置 TTS API，请在左侧「设置」中填写 API URL")
@@ -312,7 +412,7 @@ class SynthesisPanel(QWidget):
             self._log_msg("⚠ 请先在音色面板上传参考音频")
             return
         # 先确认能启动，再做 _diff_sentences 的破坏性清理
-        if self._worker is not None and self._worker.isRunning():
+        if self._synthesis_busy():
             self._log_msg("⚠ 已有合成任务在运行")
             return
 
@@ -323,6 +423,7 @@ class SynthesisPanel(QWidget):
             self._log_msg("✅ 所有句子均未变化，无需重新合成")
             self._refresh_segment_list()
             self._refresh_merge_button()
+            self._refresh_regen_changed_button()
             return
 
         indices_to_synth = sorted(set(changed + new_sentences + failed))
@@ -330,6 +431,12 @@ class SynthesisPanel(QWidget):
             self._log_msg("⚠ 没有需要合成的句子")
             return
 
+        self._begin_batch_synthesis(indices_to_synth)
+
+    def _begin_batch_synthesis(self, indices: list[int], log_message: str = ""):
+        """启动一次批量合成（供「开始合成」与「重新合成文本修改语句」共用）。"""
+        if not indices:
+            return
         # 全量列出磁盘上已有的片段（含本次要重做的句子），
         # 不能清空：增量合成只重做失败/变更句，清空会把
         # 之前成功合成的句子从列表里抹掉
@@ -340,13 +447,16 @@ class SynthesisPanel(QWidget):
         self._btn_regen_single.setVisible(False)
         self._was_canceled = False
         self._progress.setValue(0)
-        self._progress.setMaximum(len(indices_to_synth))
+        self._progress.setMaximum(len(indices))
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
         self._btn_merge.setEnabled(False)
         self._btn_refresh_pauses.setEnabled(False)
         self._btn_clear_output.setEnabled(False)
+        self._btn_regen_changed.setEnabled(False)
         self._log.clear()
+        if log_message:
+            self._log_msg(log_message)
 
         if self._worker is not None:
             self._retire_worker(self._worker)
@@ -355,7 +465,7 @@ class SynthesisPanel(QWidget):
         self._worker = SynthesisWorker(
             self._sentences, self._audio_name,
             self._output_dir, self._client,
-            indices=indices_to_synth,
+            indices=indices,
             previous_takes=self._project.wav_map,
         )
         self._worker.setProperty("project_dir", self._project.project_dir)
@@ -422,6 +532,7 @@ class SynthesisPanel(QWidget):
                 worker.deleteLater()
             except RuntimeError:
                 pass
+        self._refresh_regen_changed_button()
 
     def _on_finished(self, wav_map=None):
         self._btn_start.setEnabled(True)
@@ -439,6 +550,7 @@ class SynthesisPanel(QWidget):
             self._status_label.setText("已停止")
             self._log_msg("━━━━━━━━━━ 已取消 ━━━━━━━━━━")
             self._refresh_merge_button()
+            self._refresh_regen_changed_button()
             return
 
         # 保存 WAV 映射（只保留当前 sentences 范围内的条目）。
@@ -456,6 +568,8 @@ class SynthesisPanel(QWidget):
         self._project.wav_map = list(existing_map.values())
         self._project.save()
         self._log_msg(f"📝 WAV 映射已保存: {len(self._project.wav_map)} 条")
+        # 重做成功后按新 wav_map 重建列表：标红状态复位，失败句显示失败占位
+        self._refresh_segment_list()
 
         self._progress.setValue(self._progress.maximum())
 
@@ -546,8 +660,8 @@ class SynthesisPanel(QWidget):
             return
         if index < 0 or index >= len(self._sentences):
             return
-        if self._single_worker is not None and self._single_worker.isRunning():
-            self._log_msg("⚠ 已有单句合成在运行，请稍候")
+        if self._synthesis_busy():
+            self._log_msg("⚠ 已有合成任务在运行，请稍候")
             return
 
         if self._single_worker is not None:
@@ -592,6 +706,7 @@ class SynthesisPanel(QWidget):
             except RuntimeError:
                 pass
         self._btn_regen_single.setEnabled(True)
+        self._refresh_regen_changed_button()
 
     def _log_msg(self, msg: str):
         self._log.appendPlainText(msg)
@@ -625,6 +740,7 @@ class SynthesisPanel(QWidget):
         self._project.save()
         self._voice_panel.clear_segments()
         self._refresh_merge_button()
+        self._refresh_regen_changed_button()
 
     def _merge_full_audio(self, force_refresh_pauses: bool = False):
         """把 output_dir 里的片段合并成完整音频，在后台线程执行。"""
@@ -727,6 +843,7 @@ class SynthesisPanel(QWidget):
         """外部（如 MainWindow）动态切换 API 客户端。"""
         self._client = client
         self._voice_panel.set_client(client)
+        self._refresh_regen_changed_button()
 
     def set_project(self, project: Project):
         """切换工程时刷新输出目录和相关状态。"""
@@ -741,13 +858,74 @@ class SynthesisPanel(QWidget):
         self._refresh_segment_list()
         self._refresh_merge_button()
 
+    def _segment_states(self) -> dict[int, tuple[str, str]]:
+        """计算每句相对 wav_map 的合成状态，返回 {0-based index: (state, note)}。
+
+        - changed：wav_map 里记录的文本与当前句子不同（源句子被修改）→ 列表标红
+        - failed：上次合成失败（status=failed）
+        - missing：wav_map 条目不指向任何音频文件
+        - ok：文本一致且音频存在
+        没有 wav_map 条目的句子不出现在结果中，由磁盘扫描决定是否显示占位条目。
+        """
+        by_index: dict[int, dict] = {}
+        for entry in self._project.wav_map:
+            if not isinstance(entry, dict):
+                continue
+            idx = entry.get("index")
+            if isinstance(idx, int) and 0 <= idx < len(self._sentences):
+                by_index.setdefault(idx, entry)
+
+        states: dict[int, tuple[str, str]] = {}
+        for i, sentence in enumerate(self._sentences):
+            entry = by_index.get(i)
+            if entry is None:
+                continue
+            old_text = entry.get("text")
+            if isinstance(old_text, str) and old_text != sentence:
+                note = (
+                    f"原句: {old_text[:80]}\n现句: {sentence[:80]}"
+                    if old_text else ""
+                )
+                states[i] = ("changed", note)
+            elif entry.get("status") == "failed":
+                error = (entry.get("error") or "").strip()
+                states[i] = ("failed", f"错误: {error[:150]}" if error else "")
+            elif not entry.get("wav"):
+                states[i] = ("missing", "")
+            else:
+                states[i] = ("ok", "")
+        return states
+
+    def _update_segment_hint(self, states: dict[int, tuple[str, str]] | None = None):
+        """更新片段列表下方的红色提示：有多少句需要因为文本修改而重新合成。"""
+        if states is None:
+            states = self._segment_states()
+        changed = sum(1 for state, _note in states.values() if state == "changed")
+        if changed:
+            self._voice_panel.set_segment_hint(
+                f"✏ {changed} 句源文本已修改（列表中标红），请重新合成"
+            )
+        else:
+            self._voice_panel.set_segment_hint("")
+
+    def _refresh_segment_states(self):
+        """句子变化后就地刷新片段列表状态（不重建列表，保留选中项与滚动位置）。"""
+        if not hasattr(self, "_voice_panel"):
+            return
+        states = self._segment_states()
+        self._voice_panel.update_segment_states(states)
+        self._update_segment_hint(states)
+
     def _refresh_segment_list(self):
         """扫描输出目录，将已有 WAV 文件显示在右侧片段列表。
 
         缺失的句子（失败/未合成）以占位条目显示，避免列表看起来
-        "齐全"而实际有空洞。
+        "齐全"而实际有空洞；源文本已修改的句子标红提示重新合成。
         """
+        # 重建列表会清空选中，先记下再恢复（单句重生成后尤其需要）
+        selected = self._voice_panel.current_segment_index()
         self._voice_panel.clear_segments()
+        states = self._segment_states()
         # collect_sentence_wavs 按数字序号排序且容忍目录缺失，
         # 字典序排序在 ≥100 句时会把 sentence_100 排到 sentence_99 前
         present: set[int] = set()
@@ -757,10 +935,19 @@ class SynthesisPanel(QWidget):
             # parse_sentence_wav_name 返回 1-based 序号
             idx_1based = parsed[0] if parsed else 0
             present.add(idx_1based)
-            self._voice_panel.add_segment(idx_1based, name)
+            state, note = states.get(idx_1based - 1, ("ok", ""))
+            self._voice_panel.add_segment(idx_1based, name, state, note)
         for i in range(len(self._sentences)):
             if (i + 1) not in present:
-                self._voice_panel.add_segment(i + 1, "⚠ 缺失（未合成或失败）")
+                state, note = states.get(i, ("missing", ""))
+                if state == "ok":
+                    # wav_map 说成功但磁盘文件不在：按缺失处理
+                    state = "missing"
+                self._voice_panel.add_missing_segment(i + 1, state, note)
+        self._update_segment_hint(states)
+        if selected is not None:
+            self._voice_panel.select_segment(selected)
+        self._refresh_regen_changed_button()
 
     def reset_for_new_project(self):
         """新建工程时清空面板状态。"""
@@ -775,6 +962,7 @@ class SynthesisPanel(QWidget):
         self._btn_merge.setEnabled(False)
         self._btn_refresh_pauses.setEnabled(False)
         self._voice_panel.reset_for_new_project()
+        self._refresh_regen_changed_button()
 
     def get_output_dir(self) -> str:
         return self._output_dir
